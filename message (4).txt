@@ -1,1 +1,1115 @@
+-- =============================================================================
+-- SYSTEM CONFIGURATIONS & GAME LOGIC INTERFACES
+-- =============================================================================
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+local CoreGui = game:GetService("CoreGui")
+local UserInputService = game:GetService("UserInputService")
+local Lighting = game:GetService("Lighting")
+local Camera = workspace.CurrentCamera
+local LocalPlayer = Players.LocalPlayer
+local Mouse = LocalPlayer:GetMouse()
 
+-- Safely retrieve the game's original raycast hook
+local Utility = require(ReplicatedStorage.Modules.Utility)
+local OriginalRaycast = Utility.Raycast
+
+local SilentAimSettings = {
+    Enabled = false,
+    HitChance = 100,
+    HitPart = "Head",
+    WallCheck = true,
+    ShowTeammates = false,
+    
+    -- FOV Configuration
+    FOVEnabled = true,
+    FOVRadius = 100,
+    FOVColor = Color3.fromRGB(240, 120, 120),
+    FOVThickness = 1,
+    FOVFilled = false,
+    FOVTransparency = 1,
+
+    -- Integrated Combat Features from File
+    Aimbot = false,
+    Triggerbot = false,
+    AimFOV = 150,
+    AimSmooth = 0.15
+}
+
+local Wallbang = {
+    Enabled = false, 
+    HitPart = "Head" 
+}
+
+local GunModSettings = {
+    RapidFire = false,
+    NoSpread = false,
+    NoRecoil = false
+}
+
+-- Instantiate Drawing FOV Circle Ring
+local FOVCircle = Drawing.new("Circle")
+FOVCircle.Visible = false
+FOVCircle.ZIndex = 200
+
+-- Global environment configuration block for Ragebot engine
+local __p6q7r8 = getgenv()
+if __p6q7r8.__s9t0u1 then
+    pcall(function() __p6q7r8.__s9t0u1:Shutdown() end)
+end
+
+-- Strict wrap around gun dependencies to avoid execution lock if game updates
+local __q3r4s5 = LocalPlayer:WaitForChild("PlayerScripts", 10)
+local __t6u7v8, __w9x0y1
+pcall(function()
+    __t6u7v8 = require(__q3r4s5.Modules.ItemTypes.Gun)
+    __w9x0y1 = require(ReplicatedStorage.Modules.Utility)
+end)
+
+local __z2a3b4 = setmetatable({}, {
+    __index = function(_, partName)
+        local character = LocalPlayer.Character
+        if not character then return nil end
+        if partName == "__root" then
+            return character:FindFirstChild("HumanoidRootPart")
+        elseif partName == "__head" then
+            return character:FindFirstChild("Head")
+        end
+        return nil
+    end
+})
+
+__p6q7r8.__s9t0u1 = {}
+
+-- Ensure all post-processing effects exist locally
+local function getOrInitEffect(className)
+    local effect = Lighting:FindFirstChildOfClass(className)
+    if not effect then
+        effect = Instance.new(className)
+        effect.Parent = Lighting
+    end
+    return effect
+end
+
+local atmosphere = getOrInitEffect("Atmosphere")
+local bloom = getOrInitEffect("BloomEffect")
+local blur = getOrInitEffect("BlurEffect")
+local colorCorrection = getOrInitEffect("ColorCorrectionEffect")
+local sunRays = getOrInitEffect("SunRaysEffect")
+
+-- =============================================================================
+-- SILENT AIM & COMBAT UTILITY FUNCTIONS
+-- =============================================================================
+local function getTargetPart(player)
+    local character = player.Character
+    if not character then return nil end
+    local part = character:FindFirstChild(SilentAimSettings.HitPart)
+    if not part then
+        part = character:FindFirstChild("Head")
+    end
+    return part
+end
+
+local function isAlive(player)
+    local character = player.Character
+    if not character then return false end
+    local humanoid = character:FindFirstChildWhichIsA("Humanoid")
+    if not humanoid then return false end
+    return humanoid.Health > 0
+end
+
+local function isVisible(origin, targetPart, originalIgnore)
+    if not SilentAimSettings.WallCheck then
+        return true
+    end
+    local direction = targetPart.Position - origin
+    local distance = direction.Magnitude
+    if distance <= 0 then return false end
+
+    local raycastParams = RaycastParams.new()
+    raycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+    local ignoreList = { LocalPlayer.Character }
+
+    local targetChar = targetPart.Parent
+    if targetChar then
+        table.insert(ignoreList, targetChar)
+    end
+
+    if originalIgnore then
+        if type(originalIgnore) == "table" then
+            for _, v in ipairs(originalIgnore) do table.insert(ignoreList, v) end
+        else
+            table.insert(ignoreList, originalIgnore)
+        end
+    end
+
+    raycastParams.FilterDescendantsInstances = ignoreList
+
+    local result = Workspace:Raycast(origin, direction, raycastParams)
+    if not result then
+        return true
+    end
+
+    local hitInstance = result.Instance
+    if hitInstance == targetPart or (targetChar and hitInstance:IsDescendantOf(targetChar)) then
+        return true
+    end
+
+    return false
+end
+
+local function getClosestPlayerToMouse()
+    local shortestDist = math.huge
+    local closest = nil
+    local mousePos = UserInputService:GetMouseLocation()
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and isAlive(player) then
+            if player.Team == LocalPlayer.Team and player.Team ~= nil and not SilentAimSettings.ShowTeammates then
+                continue
+            end
+
+            local hitPart = getTargetPart(player)
+            if hitPart then
+                local screenPos, onScreen = Camera:WorldToViewportPoint(hitPart.Position)
+                if onScreen then
+                    local dist = (Vector2.new(screenPos.X, screenPos.Y) - mousePos).Magnitude
+                    
+                    if SilentAimSettings.FOVEnabled then
+                        if dist <= SilentAimSettings.FOVRadius and dist < shortestDist then
+                            shortestDist = dist
+                            closest = player
+                        end
+                    else
+                        if dist < shortestDist then
+                            shortestDist = dist
+                            closest = player
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return closest
+end
+
+-- Intercept the game's Raycast functionality for Silent Aim
+Utility.Raycast = function(self, from, to, range, ignore, mode, debug)
+    if not SilentAimSettings.Enabled then
+        return OriginalRaycast(self, from, to, range, ignore, mode, debug)
+    end
+
+    if math.random(1, 100) > SilentAimSettings.HitChance then
+        return OriginalRaycast(self, from, to, range, ignore, mode, debug)
+    end
+
+    local target = getClosestPlayerToMouse()
+    if not target then
+        return OriginalRaycast(self, from, to, range, ignore, mode, debug)
+    end
+
+    local hitPart = getTargetPart(target)
+    if not hitPart then
+        return OriginalRaycast(self, from, to, range, ignore, mode, debug)
+    end
+
+    if not isVisible(from, hitPart, ignore) then
+        return OriginalRaycast(self, from, to, range, ignore, mode, debug)
+    end
+
+    local hitPosition = hitPart.Position
+    local direction = (hitPosition - from).Unit
+    local distance = (hitPosition - from).Magnitude
+
+    if distance > range then
+        distance = range
+        hitPosition = from + direction * range
+    end
+
+    return {
+        Position = hitPosition,
+        Distance = distance,
+        Instance = hitPart,
+        Material = hitPart.Material,
+        Normal = -direction,
+    }
+end
+
+-- =============================================================================
+-- RAGEBOT ENGINE BACKEND
+-- =============================================================================
+do
+    local __i1j2k3 = __p6q7r8.__s9t0u1
+    
+    function __i1j2k3:__init()
+        self.__active = false
+        self.__target = nil
+        self.__desync = false
+        self.__conn1 = nil
+        self.__conn2 = nil
+        self.__task1 = nil
+        self.__oldfunc = nil
+        self.__autoshootConnection = nil
+    end
+
+    function __i1j2k3:__find()
+        local closestPlayer = nil
+        local maxDistance = math.huge
+        for _, otherPlayer in next, Players:GetPlayers() do
+            if otherPlayer == LocalPlayer then continue end
+            if otherPlayer:GetAttribute("TeamID") == LocalPlayer:GetAttribute("TeamID") then continue end
+            
+            local char = otherPlayer.Character
+            if not char then continue end
+            
+            local head = char:FindFirstChild("Head")
+            local hum = char:FindFirstChildWhichIsA("Humanoid")
+            if not (head and hum and hum.Health > 0) then continue end
+            
+            local distance = (Camera.CFrame.Position - head.Position).Magnitude
+            if distance < maxDistance then
+                maxDistance = distance
+                closestPlayer = otherPlayer
+            end
+        end
+        return closestPlayer
+    end
+
+    function __i1j2k3:__getHitPart(char)
+        if Wallbang.HitPart == "Head" then
+            return char:FindFirstChild("Head")
+        else
+            return char:FindFirstChild("UpperTorso")
+                or char:FindFirstChild("Torso")
+                or char:FindFirstChild("HumanoidRootPart")
+        end
+    end
+
+    function __i1j2k3:__startAutoShoot()
+        if self.__autoshootConnection then
+            self.__autoshootConnection:Disconnect()
+        end
+        
+        self.__autoshootConnection = RunService.Heartbeat:Connect(function()
+            if not self.__active or not self.__target then return end
+            
+            local target = self.__target
+            local targetChar = target.Character
+            if not targetChar then return end
+            
+            local targetHumanoid = targetChar:FindFirstChildWhichIsA("Humanoid")
+            if not targetHumanoid or targetHumanoid.Health <= 0 then return end
+            
+            local aimPart = self:__getHitPart(targetChar)
+            if not aimPart then return end
+            
+            Camera.CFrame = CFrame.new(Camera.CFrame.Position, aimPart.Position)
+            
+            local character = LocalPlayer.Character
+            if not character then return end
+            
+            local currentTool = character:FindFirstChildWhichIsA("Tool")
+            if not currentTool then return end
+            
+            local remote = ReplicatedStorage:FindFirstChild("ShootEvent") or ReplicatedStorage:FindFirstChild("FireEvent")
+            if remote and remote:IsA("RemoteEvent") then
+                remote:FireServer()
+            end
+            
+            local VirtualUser = game:GetService("VirtualUser")
+            pcall(function()
+                VirtualUser:CaptureController()
+                VirtualUser:ClickButton1(Vector2.new(0, 0))
+            end)
+        end)
+    end
+
+    function __i1j2k3:__setup()
+        if not __t6u7v8 or not __w9x0y1 then return end
+        if self.__conn1 then self.__conn1:Disconnect() end
+        self.__conn1 = RunService.Heartbeat:Connect(function()
+            if not self.__active then return end
+            self.__target = self:__find()
+        end)
+        
+        local originalStartShooting = __t6u7v8.StartShooting
+        self.__oldfunc = originalStartShooting
+        
+        __t6u7v8.StartShooting = function(fighterInstance, ...)
+            local results = {originalStartShooting(fighterInstance, ...)}
+            if not fighterInstance.ClientFighter or not fighterInstance.ClientFighter.IsLocalPlayer then
+                return unpack(results)
+            end
+            
+            local shootTable = results[3]
+            if not shootTable or typeof(shootTable) ~= "table" then
+                return unpack(results)
+            end
+            
+            results[4] = true
+            local currentTarget = self.__target
+            if not self.__active or not currentTarget or not currentTarget.Character then
+                return unpack(results)
+            end
+            
+            self:__desync_start(currentTarget)
+            task.wait(0.1)
+            
+            if self.__task1 then
+                task.cancel(self.__task1)
+                self.__task1 = nil
+            end
+            
+            local targetPart = self:__getHitPart(currentTarget.Character)
+            if not targetPart then
+                return unpack(results)
+            end
+            
+            local targetPos = targetPart.Position
+            local targetCF  = targetPart.CFrame
+            local originPos = targetPos - Vector3.new(0, 3, 0)
+            
+            shootTable[utf8.char(0)] = __w9x0y1:EncodeCFrame(CFrame.new(originPos, targetPos))
+            shootTable[utf8.char(1)] = __w9x0y1:EncodeCFrame(CFrame.new(targetPos))
+            shootTable[utf8.char(2)] = targetPart
+            
+            if shootTable.Hitbox then
+                shootTable.Hitbox = Wallbang.HitPart == "Head" and "Head" or "Body"
+            end
+            
+            self.__task1 = task.delay(0.15, function()
+                self:__desync_stop()
+            end)
+            
+            return unpack(results)
+        end
+        self:__startAutoShoot()
+    end
+
+    function __i1j2k3:__desync_start(targetPlr)
+        if self.__conn2 then self.__conn2:Disconnect() end
+        self.__desync = true
+        self.__curr = targetPlr
+        
+        self.__conn2 = RunService.Heartbeat:Connect(function()
+            if not self.__desync then return end
+            local localRoot = __z2a3b4.__root
+            if not localRoot then return end
+            
+            local targetHead = targetPlr.Character and targetPlr.Character:FindFirstChild("Head")
+            if not targetHead then
+                self:__desync_stop()
+                return
+            end
+            
+            local oldCF = localRoot.CFrame
+            localRoot.CFrame = targetHead.CFrame * CFrame.new(0, -5, 0)
+            RunService:BindToRenderStep("__restore", 101, function()
+                localRoot.CFrame = oldCF
+                RunService:UnbindFromRenderStep("__restore")
+            end)
+        end)
+    end
+
+    function __i1j2k3:__desync_stop()
+        self.__desync = false
+        self.__curr = nil
+        if self.__conn2 then
+            self.__conn2:Disconnect()
+            self.__conn2 = nil
+        end
+    end
+
+    function __i1j2k3:SetActive(state)
+        if state then
+            if not self.__active then
+                self.__active = true
+                self:__setup()
+            end
+        else
+            self:Shutdown()
+        end
+    end
+
+    function __i1j2k3:Shutdown()
+        self.__active = false
+        if self.__autoshootConnection then
+            self.__autoshootConnection:Disconnect()
+            self.__autoshootConnection = nil
+        end
+        if self.__conn1 then self.__conn1:Disconnect(); self.__conn1 = nil end
+        if self.__conn2 then self.__conn2:Disconnect(); self.__conn2 = nil end
+        if self.__task1 then task.cancel(self.__task1); self.__task1 = nil end
+        if self.__oldfunc and __t6u7v8 then
+            __t6u7v8.StartShooting = self.__oldfunc
+            self.__oldfunc = nil
+        end
+    end
+end
+
+__p6q7r8.__s9t0u1:__init()
+
+-- =============================================================================
+-- GUN MODS ENGINE SCAN LOOP
+-- =============================================================================
+local function toggleTableAttribute(attribute, value)
+    for _, gcVal in pairs(getgc(true)) do
+        if type(gcVal) == "table" and rawget(gcVal, attribute) then
+            gcVal[attribute] = value
+        end
+    end
+end
+
+task.spawn(function()
+    while task.wait(0.5) do
+        if GunModSettings.RapidFire then
+            toggleTableAttribute("ShootCooldown", 0)
+        end
+        if GunModSettings.NoSpread then
+            toggleTableAttribute("ShootSpread", 0)
+        end
+        if GunModSettings.NoRecoil then
+            toggleTableAttribute("ShootRecoil", 0)
+        end
+    end
+end)
+
+-- =============================================================================
+-- LINORIA UI OFFICIAL MAIN BRANCH INTEGRATION (FIXED URL PATHS)
+-- =============================================================================
+local repo = 'https://raw.githubusercontent.com/violin-suzutsuki/LinoriaLib/main/'
+local Library = loadstring(game:HttpGet(repo .. 'Library.lua'))()
+local ThemeManager = loadstring(game:HttpGet(repo .. 'addons/ThemeManager.lua'))()
+local SaveManager = loadstring(game:HttpGet(repo .. 'addons/SaveManager.lua'))()
+
+local Window = Library:CreateWindow({
+    Title = 'Ultra-Optimized Master Engine Framework',
+    Center = true,
+    AutoShow = true,
+    TabPadding = 8,
+    MenuFadeTime = 0.2
+})
+
+local Tabs = {
+    Combat = Window:AddTab('Combat'),
+    Visuals = Window:AddTab('Visuals'),
+    ['UI Settings'] = Window:AddTab('UI Settings')
+}
+
+-- Layout allocation groups
+local SilentAimGroupBox = Tabs.Combat:AddLeftGroupbox('silent aim')
+local RageGroupBox = Tabs.Combat:AddRightGroupbox('ragebot')
+local GunModsGroupBox = Tabs.Combat:AddLeftGroupbox('gunmods')
+
+local ESPGroupBox = Tabs.Visuals:AddLeftGroupbox('ESP Setup')
+local LeftGlobal = Tabs.Visuals:AddLeftGroupbox('Environment Core')
+local RightGlobal = Tabs.Visuals:AddRightGroupbox('Atmosphere & Fog')
+local LeftFX = Tabs.Visuals:AddLeftGroupbox('Color Correction & Blur')
+local RightFX = Tabs.Visuals:AddRightGroupbox('Bloom & SunRays (Glow Engine)')
+
+local DarkPurple = Color3.fromRGB(35, 15, 85)
+local White      = Color3.fromRGB(255, 255, 255)
+local LightPink  = Color3.fromRGB(240, 120, 120)
+
+-- Populate Silent Aim Tab (Including Triggerbot & Aimbot Integrated)
+SilentAimGroupBox:AddToggle('SA_Enabled', {
+    Text = 'silent aim',
+    Default = false,
+    Callback = function(Value) SilentAimSettings.Enabled = Value end
+})
+
+SilentAimGroupBox:AddToggle('AimToggle', {
+    Text = 'Enable Aimbot',
+    Default = false,
+    Callback = function(v) SilentAimSettings.Aimbot = v end
+})
+
+SilentAimGroupBox:AddToggle('TrigToggle', {
+    Text = 'Enable Triggerbot',
+    Default = false,
+    Callback = function(v) SilentAimSettings.Triggerbot = v end
+})
+
+SilentAimGroupBox:AddSlider('AimFOV', {
+    Text = 'FOV Radius',
+    Default = 150, Min = 0, Max = 800, Rounding = 0,
+    Callback = function(v) SilentAimSettings.AimFOV = v end
+})
+
+SilentAimGroupBox:AddSlider('AimSmooth', {
+    Text = 'Smoothness',
+    Default = 0.15, Min = 0.05, Max = 1, Rounding = 2,
+    Callback = function(v) SilentAimSettings.AimSmooth = v end
+})
+
+SilentAimGroupBox:AddToggle('SA_Wallcheck', {
+    Text = 'Wall Check',
+    Default = true,
+    Callback = function(Value) SilentAimSettings.WallCheck = Value end
+})
+
+SilentAimGroupBox:AddSlider('SA_HitChance', {
+    Text = 'Hit Chance',
+    Default = 100, Min = 1, Max = 100, Rounding = 0, Compact = true, Suffix = '%'
+}):OnChanged(function(Value) SilentAimSettings.HitChance = Value end)
+
+SilentAimGroupBox:AddDropdown('SA_HitPart', {
+    Values = { 'Head', 'HumanoidRootPart', 'UpperTorso' },
+    Default = 1, Text = 'Target Hitpart', Multi = false
+}):OnChanged(function(Value) SilentAimSettings.HitPart = Value end)
+
+SilentAimGroupBox:AddToggle('SA_FOVEnabled', {
+    Text = 'Show FOV Circle',
+    Default = true,
+    Callback = function(Value) SilentAimSettings.FOVEnabled = Value end
+})
+
+SilentAimGroupBox:AddSlider('SA_FOVRadius', {
+    Text = 'FOV Circle Radius',
+    Default = 100, Min = 10, Max = 600, Rounding = 0, Compact = true, Suffix = 'px'
+}):OnChanged(function(Value) SilentAimSettings.FOVRadius = Value end)
+
+SilentAimGroupBox:AddToggle('SA_FOVFilled', {
+    Text = 'Fill FOV Interior',
+    Default = false,
+    Callback = function(Value) SilentAimSettings.FOVFilled = Value end
+})
+
+SilentAimGroupBox:AddSlider('SA_FOVTransparency', {
+    Text = 'FOV Transparency',
+    Default = 100, Min = 0, Max = 100, Rounding = 0, Compact = true, Suffix = '%'
+}):OnChanged(function(Value) SilentAimSettings.FOVTransparency = Value / 100 end)
+
+SilentAimGroupBox:AddLabel('FOV Ring Color'):AddColorPicker('SA_FOVColor', {
+    Default = Color3.fromRGB(240, 120, 120),
+    Callback = function(Value) SilentAimSettings.FOVColor = Value end
+})
+
+-- Populate Ragebot
+RageGroupBox:AddToggle('RagebotToggle', {
+    Text = 'ragebot',
+    Default = false,
+    Callback = function(Value)
+        Wallbang.Enabled = Value
+        __p6q7r8.__s9t0u1:SetActive(Value)
+    end
+})
+
+RageGroupBox:AddDropdown('HitPartDropdown', {
+    Values = { 'Head', 'Body' },
+    Default = 1, Multi = false, Text = 'Target Hitpart',
+    Callback = function(Value) Wallbang.HitPart = Value end
+})
+
+-- Populate Gunmods
+GunModsGroupBox:AddToggle('GM_RapidFire', {
+    Text = 'rapidfire',
+    Default = false,
+    Callback = function(Value) GunModSettings.RapidFire = Value end
+})
+
+GunModsGroupBox:AddToggle('GM_NoSpread', {
+    Text = 'no spread',
+    Default = false,
+    Callback = function(Value) GunModSettings.NoSpread = Value end
+})
+
+GunModsGroupBox:AddToggle('GM_NoRecoil', {
+    Text = 'no recoil',
+    Default = false,
+    Callback = function(Value) GunModSettings.NoRecoil = Value end
+})
+
+-- Populate ESP Setup Controls
+local NameToggle = ESPGroupBox:AddToggle('ESP_Name', { Text = 'Name', Default = true })
+NameToggle:AddColorPicker('NameColor1', { Default = White, Title = 'Text Color' })
+NameToggle:AddColorPicker('NameColor2', { Default = DarkPurple, Title = 'Outline Color' })
+
+local WeaponToggle = ESPGroupBox:AddToggle('ESP_Weapon', { Text = 'Weapon', Default = true })
+WeaponToggle:AddColorPicker('WeaponColor1', { Default = White, Title = 'Text Color' })
+WeaponToggle:AddColorPicker('WeaponColor2', { Default = DarkPurple, Title = 'Outline Color' })
+
+local DistanceToggle = ESPGroupBox:AddToggle('ESP_Distance', { Text = 'Distance', Default = true })
+DistanceToggle:AddColorPicker('DistanceColor1', { Default = White, Title = 'Text Color' })
+DistanceToggle:AddColorPicker('DistanceColor2', { Default = DarkPurple, Title = 'Outline Color' })
+
+local BoxToggle = ESPGroupBox:AddToggle('ESP_Box', { Text = 'Box', Default = true })
+BoxToggle:AddColorPicker('BoxColor1', { Default = LightPink, Title = 'Box Frame' })
+BoxToggle:AddColorPicker('BoxColor2', { Default = DarkPurple, Title = 'Box Outline' })
+
+local SkeletonToggle = ESPGroupBox:AddToggle('ESP_Skeleton', { Text = 'Skeleton', Default = true })
+SkeletonToggle:AddColorPicker('SkeletonColor1', { Default = LightPink, Title = 'Limbs Bone Color' })
+SkeletonToggle:AddColorPicker('SkeletonColor2', { Default = White, Title = 'Spine/Head Color' })
+
+local HealthbarToggle = ESPGroupBox:AddToggle('ESP_Healthbar', { Text = 'Healthbar', Default = true })
+HealthbarToggle:AddColorPicker('HealthbarColor1', { Default = Color3.fromRGB(0, 255, 100), Title = 'Max Health' })
+HealthbarToggle:AddColorPicker('HealthbarColor2', { Default = Color3.fromRGB(255, 50, 50), Title = 'Low Health' })
+
+local HighlightToggle = ESPGroupBox:AddToggle('ESP_Highlight', { Text = 'Highlight', Default = false })
+HighlightToggle:AddColorPicker('HighlightColor1', { Default = LightPink, Title = 'Fill Color' })
+HighlightToggle:AddColorPicker('HighlightColor2', { Default = White, Title = 'Outline Color' })
+
+ESPGroupBox:AddToggle('ESP_BetterBounds', { Text = 'Better Bounds', Default = true })
+ESPGroupBox:AddToggle('ESP_ShowTeammates', { Text = 'Show Teammates', Default = false })
+
+ESPGroupBox:AddSlider('ESP_SkeletonThickness', { Text = 'Skeleton Thickness', Default = 1, Min = 1, Max = 5, Rounding = 0, Compact = true, Suffix = 'px' })
+ESPGroupBox:AddSlider('ESP_TextSize', { Text = 'Text Size', Default = 13, Min = 10, Max = 22, Rounding = 0, Compact = true, Suffix = 'px' })
+
+-- =============================================================================
+-- ULTIMATE LIGHTING STUDIO CONFIGURATIONS INSIDE VISUALS
+-- =============================================================================
+
+-- Left Column: Core Values
+LeftGlobal:AddSlider('LightingBrightness', {
+    Text = 'Brightness', Default = Lighting.Brightness, Min = 0, Max = 15, Rounding = 2,
+    Callback = function(v) Lighting.Brightness = v end
+})
+
+LeftGlobal:AddSlider('LightingTime', {
+    Text = 'Clock Time', Default = Lighting.ClockTime, Min = 0, Max = 24, Rounding = 2,
+    Callback = function(v) Lighting.ClockTime = v end
+})
+
+LeftGlobal:AddSlider('LightingExposure', {
+    Text = 'Exposure Compensation (OP Glow)', Default = Lighting.ExposureCompensation, Min = -5, Max = 5, Rounding = 2,
+    Callback = function(v) Lighting.ExposureCompensation = v end
+})
+
+LeftGlobal:AddSlider('ShadowSoftness', {
+    Text = 'Shadow Softness', Default = Lighting.ShadowSoftness, Min = 0, Max = 1, Rounding = 2,
+    Callback = function(v) Lighting.ShadowSoftness = v end
+})
+
+LeftGlobal:AddToggle('GlobalShadows', {
+    Text = 'Global Shadows', Default = Lighting.GlobalShadows,
+    Callback = function(v) Lighting.GlobalShadows = v end
+})
+
+LeftGlobal:AddLabel('Ambient (Indoors/Shadows)'):AddColorPicker('AmbientPicker', {
+    Default = Lighting.Ambient, Title = 'Ambient Color', Callback = function(v) Lighting.Ambient = v end
+})
+
+LeftGlobal:AddLabel('Outdoor Ambient'):AddColorPicker('OutdoorAmbientPicker', {
+    Default = Lighting.OutdoorAmbient, Title = 'Outdoor Ambient Color', Callback = function(v) Lighting.OutdoorAmbient = v end
+})
+
+LeftGlobal:AddLabel('Color Shift (Top)'):AddColorPicker('ColorShiftTopPicker', {
+    Default = Lighting.ColorShift_Top, Title = 'Color Shift Top', Callback = function(v) Lighting.ColorShift_Top = v end
+})
+
+LeftGlobal:AddLabel('Color Shift (Bottom)'):AddColorPicker('ColorShiftBottomPicker', {
+    Default = Lighting.ColorShift_Bottom, Title = 'Color Shift Bottom', Callback = function(v) Lighting.ColorShift_Bottom = v end
+})
+
+-- Right Column: Atmosphere / Fog Depth
+RightGlobal:AddSlider('AtmosphereDensity', {
+    Text = 'Fog Thickness (Density)', Default = atmosphere.Density, Min = 0, Max = 1, Rounding = 3,
+    Callback = function(v) atmosphere.Density = v end
+})
+
+RightGlobal:AddSlider('AtmosphereOffset', {
+    Text = 'Fog Height Level (Offset)', Default = atmosphere.Offset, Min = 0, Max = 100, Rounding = 1,
+    Callback = function(v) atmosphere.Offset = v end
+})
+
+RightGlobal:AddSlider('AtmosphereHaze', {
+    Text = 'Haze / Air Glare', Default = atmosphere.Haze, Min = 0, Max = 10, Rounding = 2,
+    Callback = function(v) atmosphere.Haze = v end
+})
+
+RightGlobal:AddSlider('AtmosphereGlare', {
+    Text = 'Sun Glare Intensity', Default = atmosphere.Glare, Min = 0, Max = 10, Rounding = 2,
+    Callback = function(v) atmosphere.Glare = v end
+})
+
+RightGlobal:AddLabel('Fog Scatter/Decay Color'):AddColorPicker('AtmosphereDecayPicker', {
+    Default = atmosphere.Decay, Title = 'Fog Color', Callback = function(v) atmosphere.Decay = v end
+})
+
+RightGlobal:AddLabel('Atmosphere Color'):AddColorPicker('AtmosphereColorPicker', {
+    Default = atmosphere.Color, Title = 'Atmosphere Base Color', Callback = function(v) atmosphere.Color = v end
+})
+
+-- Color Correction & Screen Blur
+LeftFX:AddSlider('CCBrightness', {
+    Text = 'Contrast Brightness', Default = colorCorrection.Brightness, Min = -1, Max = 1, Rounding = 2,
+    Callback = function(v) colorCorrection.Brightness = v end
+})
+
+LeftFX:AddSlider('CCContrast', {
+    Text = 'Contrast Intensity', Default = colorCorrection.Contrast, Min = -1, Max = 5, Rounding = 2,
+    Callback = function(v) colorCorrection.Contrast = v end
+})
+
+LeftFX:AddSlider('CCSaturation', {
+    Text = 'Saturation (Deep Colors/Deepfry)', Default = colorCorrection.Saturation, Min = -1, Max = 5, Rounding = 2,
+    Callback = function(v) colorCorrection.Saturation = v end
+})
+
+LeftFX:AddSlider('BlurSize', {
+    Text = 'Screen Blur Size', Default = blur.Size, Min = 0, Max = 50, Rounding = 1,
+    Callback = function(v) blur.Size = v end
+})
+
+LeftFX:AddLabel('Screen Color Tint'):AddColorPicker('CCTintPicker', {
+    Default = colorCorrection.TintColor, Title = 'Color Tint', Callback = function(v) colorCorrection.TintColor = v end
+})
+
+-- Bloom & SunRays (Blinding, Anime-style glow arrays)
+RightFX:AddSlider('BloomIntensity', {
+    Text = 'Bloom Glow Intensity', Default = bloom.Intensity, Min = 0, Max = 20, Rounding = 2,
+    Callback = function(v) bloom.Intensity = v end
+})
+
+RightFX:AddSlider('BloomSize', {
+    Text = 'Bloom Radius (Size)', Default = bloom.Size, Min = 0, Max = 56, Rounding = 1,
+    Callback = function(v) bloom.Size = v end
+})
+
+RightFX:AddSlider('BloomThreshold', {
+    Text = 'Bloom Cutoff Threshold', Default = bloom.Threshold, Min = 0, Max = 4, Rounding = 2,
+    Callback = function(v) bloom.Threshold = v end
+})
+
+RightFX:AddSlider('SunRayIntensity', {
+    Text = 'God Rays Intensity', Default = sunRays.Intensity, Min = 0, Max = 10, Rounding = 2,
+    Callback = function(v) sunRays.Intensity = v end
+})
+
+RightFX:AddSlider('SunRaySpread', {
+    Text = 'God Rays Spread/Width', Default = sunRays.Spread, Min = 0, Max = 1, Rounding = 2,
+    Callback = function(v) sunRays.Spread = v end
+})
+
+-- Setup Theme Managers
+ThemeManager:SetLibrary(Library)
+SaveManager:SetLibrary(Library)
+SaveManager:IgnoreThemeSettings()
+SaveManager:SetIgnoreIndexes({ 'BackgroundColor', 'SA_HitPart', 'HitPartDropdown' })
+ThemeManager:SetFolder('LinoriaLibConfigs')
+SaveManager:SetFolder('LinoriaLibConfigs/Visuals')
+SaveManager:BuildConfigSection(Tabs['UI Settings'])
+ThemeManager:ApplyToTab(Tabs['UI Settings'])
+
+-- =============================================================================
+-- ULTRA HIGH-PERFORMANCE ESP BACKEND CORE ENGINE
+-- =============================================================================
+local ESP_Cache = {}
+
+local R15_Bones = {
+    Spine = {{"UpperTorso", "LowerTorso"}, {"UpperTorso", "Head"}},
+    Limbs = {
+        {"UpperTorso", "LeftUpperArm"}, {"LeftUpperArm", "LeftLowerArm"}, {"LeftLowerArm", "LeftHand"},
+        {"UpperTorso", "RightUpperArm"}, {"RightUpperArm", "RightLowerArm"}, {"RightLowerArm", "RightHand"},
+        {"LowerTorso", "LeftUpperLeg"}, {"LeftUpperLeg", "LeftLowerLeg"}, {"LeftLowerLeg", "LeftFoot"},
+        {"LowerTorso", "RightUpperLeg"}, {"RightUpperLeg", "RightLowerLeg"}, {"RightLowerLeg", "RightFoot"}
+    }
+}
+local R6_Bones = {
+    Spine = {{"Torso", "Head"}},
+    Limbs = {
+        {"Torso", "Left Arm"}, {"Torso", "Right Arm"},
+        {"Torso", "Left Leg"}, {"Torso", "Right Leg"}
+    }
+}
+
+local function CachePlayerParts(data, char, rigType)
+    data.CachedParts = {}
+    if not char then return end
+    
+    local structure = (rigType == Enum.HumanoidRigType.R15) and R15_Bones or R6_Bones
+    data.CachedParts["HumanoidRootPart"] = char:FindFirstChild("HumanoidRootPart")
+
+    local function checkAndCache(name)
+        if not data.CachedParts[name] then
+            data.CachedParts[name] = char:FindFirstChild(name)
+        end
+    end
+
+    for _, pair in ipairs(structure.Spine) do checkAndCache(pair[1]) checkAndCache(pair[2]) end
+    for _, pair in ipairs(structure.Limbs) do checkAndCache(pair[1]) checkAndCache(pair[2]) end
+end
+
+local function RemovePlayerESP(player)
+    local data = ESP_Cache[player]
+    if data then
+        data.BoxOutline:Destroy() data.Box:Destroy()
+        data.HealthBarBg:Destroy() data.HealthBar:Destroy()
+        data.NameText:Destroy() data.WeaponText:Destroy() data.DistanceText:Destroy()
+        for i = 1, #data.SkeletonLines do data.SkeletonLines[i]:Destroy() end
+        if data.Highlight then data.Highlight:Destroy() end
+        ESP_Cache[player] = nil
+    end
+end
+
+local function AddPlayerESP(player)
+    if player == LocalPlayer then return end
+    
+    local data = {
+        BoxOutline = Drawing.new("Square"), Box = Drawing.new("Square"),
+        HealthBarBg = Drawing.new("Line"), HealthBar = Drawing.new("Line"),
+        NameText = Drawing.new("Text"), WeaponText = Drawing.new("Text"), DistanceText = Drawing.new("Text"),
+        SkeletonLines = {}, CachedParts = {}, RigType = Enum.HumanoidRigType.R6
+    }
+
+    data.BoxOutline.Filled = false data.BoxOutline.Thickness = 3
+    data.Box.Filled = false data.Box.Thickness = 1
+    data.HealthBarBg.Thickness = 3 data.HealthBarBg.Color = Color3.fromRGB(0, 0, 0)
+    data.HealthBar.Thickness = 1
+    data.NameText.Center = true data.NameText.Outline = true
+    data.WeaponText.Center = true data.WeaponText.Outline = true
+    data.DistanceText.Center = true data.DistanceText.Outline = true
+
+    for i = 1, 14 do
+        local line = Drawing.new("Line")
+        line.Visible = false
+        data.SkeletonLines[i] = line
+    end
+
+    data.Highlight = Instance.new("Highlight")
+    data.Highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    data.Highlight.Parent = CoreGui
+
+    local function setupChar(char)
+        if not char then return end
+        local hum = char:WaitForChild("Humanoid", 5)
+        if hum then
+            data.RigType = hum.RigType
+            CachePlayerParts(data, char, hum.RigType)
+        end
+    end
+
+    player.CharacterAdded:Connect(setupChar)
+    if player.Character then setupChar(player.Character) end
+
+    ESP_Cache[player] = data
+end
+
+-- =============================================================================
+-- MASTER RUNTIME RUNSTEPMOUNT LOOPS
+-- =============================================================================
+RunService.RenderStepped:Connect(function()
+    local mouseLoc = UserInputService:GetMouseLocation()
+    local isRightClickHolding = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+
+    -- 1. FOV Ring Refresh Processing
+    if SilentAimSettings.Enabled and SilentAimSettings.FOVEnabled then
+        FOVCircle.Position = mouseLoc
+        FOVCircle.Radius = SilentAimSettings.FOVRadius
+        FOVCircle.Color = SilentAimSettings.FOVColor
+        FOVCircle.Thickness = SilentAimSettings.FOVThickness
+        FOVCircle.Filled = SilentAimSettings.FOVFilled
+        FOVCircle.Transparency = SilentAimSettings.FOVTransparency
+        FOVCircle.Visible = true
+    else
+        FOVCircle.Visible = false
+    end
+
+    -- 2. Integrated Aimbot & Triggerbot Core Logic Processing from file
+    if isRightClickHolding then
+        if SilentAimSettings.Triggerbot then
+            local t = Mouse.Target
+            if t and t.Parent and t:FindFirstAncestorOfClass("Model"):FindFirstChild("Humanoid") and t:FindFirstAncestorOfClass("Model") ~= LocalPlayer.Character then
+                mouse1click()
+            end
+        end
+        if SilentAimSettings.Aimbot then
+            local target, closest = nil, SilentAimSettings.AimFOV
+            for _, v in pairs(Players:GetPlayers()) do
+                if v ~= LocalPlayer and v.Character and v.Character:FindFirstChild("Head") then
+                    local pos, onScreen = Camera:WorldToViewportPoint(v.Character.Head.Position)
+                    if onScreen then
+                        local mag = (Vector2.new(pos.X, pos.Y) - mouseLoc).Magnitude
+                        if mag < closest then 
+                            closest = mag 
+                            target = v.Character.Head 
+                        end
+                    end
+                end
+            end
+            if target then
+                local pos = Camera:WorldToViewportPoint(target.Position)
+                mousemoverel((pos.X - mouseLoc.X) * SilentAimSettings.AimSmooth, (pos.Y - mouseLoc.Y) * SilentAimSettings.AimSmooth)
+            end
+        end
+    end
+
+    -- 3. ESP Framework Frame Processing
+    local showNames = Toggles.ESP_Name.Value
+    local showWeapons = Toggles.ESP_Weapon.Value
+    local showDist = Toggles.ESP_Distance.Value
+    local showBox = Toggles.ESP_Box.Value
+    local showSkele = Toggles.ESP_Skeleton.Value
+    local showHealth = Toggles.ESP_Healthbar.Value
+    local showHighlight = Toggles.ESP_Highlight.Value
+    local showTeammates = Toggles.ESP_ShowTeammates.Value
+    local betterBounds = Toggles.ESP_BetterBounds.Value
+    
+    local skeletonThick = Options.ESP_SkeletonThickness.Value
+    local textSizeValue = Options.ESP_TextSize.Value
+    
+    local nameCol1, nameCol2 = Options.NameColor1.Value, Options.NameColor2.Value
+    local weapCol1, weapCol2 = Options.WeaponColor1.Value, Options.WeaponColor2.Value
+    local distCol1, distCol2 = Options.DistanceColor1.Value, Options.DistanceColor2.Value
+    local boxCol1, boxCol2 = Options.BoxColor1.Value, Options.BoxColor2.Value
+    local skeleCol1, skeleCol2 = Options.SkeletonColor1.Value, Options.SkeletonColor2.Value
+    local hpCol1, hpCol2 = Options.HealthbarColor1.Value, Options.HealthbarColor2.Value
+    local hlCol1, hlCol2 = Options.HighlightColor1.Value, Options.HighlightColor2.Value
+
+    local localRoot = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+    local localPos = localRoot and localRoot.Position or Camera.Focus.Position
+
+    for player, data in pairs(ESP_Cache) do
+        local char = player.Character
+        local root = data.CachedParts["HumanoidRootPart"]
+        
+        if not root or not root.Parent then
+            root = char and char:FindFirstChild("HumanoidRootPart")
+            if root then data.CachedParts["HumanoidRootPart"] = root end
+        end
+
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+
+        if not (char and root and hum and hum.Health > 0) or (player.Team == LocalPlayer.Team and player.Team ~= nil and not showTeammates) then
+            data.BoxOutline.Visible = false data.Box.Visible = false
+            data.HealthBarBg.Visible = false data.HealthBar.Visible = false
+            data.NameText.Visible = false data.WeaponText.Visible = false data.DistanceText.Visible = false
+            data.Highlight.Adornee = nil
+            for i = 1, #data.SkeletonLines do data.SkeletonLines[i].Visible = false end
+            continue
+        end
+
+        local rootPos = root.Position
+        local dist = (rootPos - localPos).Magnitude
+
+        local offset = betterBounds and 0.5 or 0
+        local topScreen, onScreen1 = Camera:WorldToViewportPoint(rootPos + Vector3.new(0, 3 + offset, 0))
+        local bottomScreen, onScreen2 = Camera:WorldToViewportPoint(rootPos + Vector3.new(0, -3.5 - offset, 0))
+
+        if onScreen1 or onScreen2 then
+            local boxHeight = math.abs(topScreen.Y - bottomScreen.Y)
+            local boxWidth = boxHeight * 0.62
+            local boxX = topScreen.X - (boxWidth / 2)
+            local boxY = topScreen.Y
+
+            -- Boxes
+            if showBox then
+                local sz = Vector2.new(boxWidth, boxHeight)
+                local pos = Vector2.new(boxX, boxY)
+                data.BoxOutline.Size = sz data.BoxOutline.Position = pos data.BoxOutline.Color = boxCol2 data.BoxOutline.Visible = true
+                data.Box.Size = sz data.Box.Position = pos data.Box.Color = boxCol1 data.Box.Visible = true
+            else
+                data.BoxOutline.Visible = false data.Box.Visible = false
+            end
+
+            -- Healthbars
+            if showHealth then
+                local pct = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
+                local barX = boxX - 5
+                data.HealthBarBg.From = Vector2.new(barX, boxY)
+                data.HealthBarBg.To = Vector2.new(barX, boxY + boxHeight)
+                data.HealthBarBg.Visible = true
+                
+                data.HealthBar.From = Vector2.new(barX, boxY + boxHeight)
+                data.HealthBar.To = Vector2.new(barX, (boxY + boxHeight) - (boxHeight * pct))
+                data.HealthBar.Color = hpCol2:Lerp(hpCol1, pct)
+                data.HealthBar.Visible = true
+            else
+                data.HealthBarBg.Visible = false data.HealthBar.Visible = false
+            end
+
+            -- Texts
+            local textOffset = 0
+            if showNames then
+                data.NameText.Text = player.DisplayName or player.Name
+                data.NameText.Size = textSizeValue data.NameText.Color = nameCol1 data.NameText.OutlineColor = nameCol2
+                data.NameText.Position = Vector2.new(topScreen.X, boxY - textSizeValue - 3)
+                data.NameText.Visible = true
+            else data.NameText.Visible = false end
+
+            if showWeapons then
+                local tool = char:FindFirstChildOfClass("Tool")
+                data.WeaponText.Text = tool and tool.Name or "Hands"
+                data.WeaponText.Size = textSizeValue data.WeaponText.Color = weapCol1 data.WeaponText.OutlineColor = weapCol2
+                data.WeaponText.Position = Vector2.new(topScreen.X, boxY + boxHeight + textOffset)
+                textOffset = textOffset + textSizeValue
+            else data.WeaponText.Visible = false end
+
+            if showDist then
+                data.DistanceText.Text = tostring(math.round(dist)) .. " studs"
+                data.DistanceText.Size = textSizeValue data.DistanceText.Color = distCol1 data.DistanceText.OutlineColor = distCol2
+                data.DistanceText.Position = Vector2.new(topScreen.X, boxY + boxHeight + textOffset)
+                data.DistanceText.Visible = true
+            else data.DistanceText.Visible = false end
+
+            -- Skeleton Handling Processing Pipeline
+            if showSkele and dist < 175 then
+                if next(data.CachedParts) == nil then CachePlayerParts(data, char, data.RigType) end
+                
+                local boneStructure = (data.RigType == Enum.HumanoidRigType.R15) and R15_Bones or R6_Bones
+                local framePositions = {}
+                local lineIdx = 1
+
+                local function getPartScreenVec(partName)
+                    if framePositions[partName] ~= nil then 
+                        return framePositions[partName] 
+                    end
+                    local partInstance = data.CachedParts[partName]
+                    if partInstance and partInstance.Parent then
+                        local p, onScreen = Camera:WorldToViewportPoint(partInstance.Position)
+                        if onScreen then
+                            framePositions[partName] = Vector2.new(p.X, p.Y)
+                            return framePositions[partName]
+                        end
+                    end
+                    framePositions[partName] = false
+                    return false
+                end
+
+                for i = 1, #boneStructure.Spine do
+                    local pair = boneStructure.Spine[i]
+                    local a, b = getPartScreenVec(pair[1]), getPartScreenVec(pair[2])
+                    if a and b then
+                        local l = data.SkeletonLines[lineIdx]
+                        l.From = a l.To = b l.Color = skeleCol2 l.Thickness = skeletonThick l.Visible = true
+                        lineIdx = lineIdx + 1
+                    end
+                end
+
+                for i = 1, #boneStructure.Limbs do
+                    local pair = boneStructure.Limbs[i]
+                    local a, b = getPartScreenVec(pair[1]), getPartScreenVec(pair[2])
+                    if a and b then
+                        local l = data.SkeletonLines[lineIdx]
+                        l.From = a l.To = b l.Color = skeleCol1 l.Thickness = skeletonThick l.Visible = true
+                        lineIdx = lineIdx + 1
+                    end
+                end
+
+                for i = lineIdx, #data.SkeletonLines do data.SkeletonLines[i].Visible = false end
+            else
+                for i = 1, #data.SkeletonLines do data.SkeletonLines[i].Visible = false end
+            end
+
+            -- Adornee Highlights Engine
+            if showHighlight then
+                data.Highlight.Adornee = char data.Highlight.FillColor = hlCol1 data.Highlight.OutlineColor = hlCol2 data.Highlight.FillTransparency = 0.4
+            else data.Highlight.Adornee = nil end
+        else
+            data.BoxOutline.Visible = false data.Box.Visible = false
+            data.HealthBarBg.Visible = false data.HealthBar.Visible = false
+            data.NameText.Visible = false data.WeaponText.Visible = false data.DistanceText.Visible = false
+            data.Highlight.Adornee = nil
+            for i = 1, #data.SkeletonLines do data.SkeletonLines[i].Visible = false end
+        end
+    end
+end)
+
+-- Initialize ESP loops
+for _, p in ipairs(Players:GetPlayers()) do AddPlayerESP(p) end
+Players.PlayerAdded:Connect(AddPlayerESP)
+Players.PlayerRemoving:Connect(RemovePlayerESP)
+
+print("[Framework] Configuration with Master Visuals & Fixed Repository Links Loaded.")
