@@ -1,301 +1,1510 @@
--- Services
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local TweenService = game:GetService("TweenService")
+--check if game is loaded
+while not game:IsLoaded() do task.wait(0.1) end
 
-local LocalPlayer = Players.LocalPlayer
+local ac = (gethui and gethui()) or game:GetService("CoreGui")
 
--- State Variables
-local Config = {
-    CoinAutofarm = false,
-    AutoReset = false,
-    AutoFling = false,
-    FarmSpeed = 25
+-- ui links
+local bc = loadstring(game:HttpGet('https://raw.githubusercontent.com/visnoukkk/Creep.cc/refs/heads/main/Source.lua'))()
+local ci = loadstring(game:HttpGet('https://raw.githubusercontent.com/visnoukkk/Creep.cc/refs/heads/main/addons/ThemeManager.lua'))()
+local bx = loadstring(game:HttpGet('https://raw.githubusercontent.com/visnoukkk/Creep.cc/refs/heads/main/addons/SaveManager.lua'))()
+
+-- create window
+local dc = bc:CreateWindow({
+    Title = 'creep.cc autofarm',
+    Center = true,
+    AutoShow = true,
+    TabPadding = 8,
+    MenuFadeTime = 0.2,
+})
+
+-- create tabs (Autofarm & Settings only)
+local ch = {
+    Autofarm = dc:AddTab('Autofarm'),
+    Settings = dc:AddTab('Settings'),
 }
 
-local RoundActive = false
-local CurrentBagCount = 0
-local MaxBagCapacity = 40 -- Will automatically adjust to 50 if Elite Gamepass is owned
-local IsResetting = false
-local StartPosition = nil
-local TotalCollected = 0
+--------------------------------------------------------------------------------
+-- AUTOFARM TAB & SYSTEM (PORTED FROM F$VL)
+--------------------------------------------------------------------------------
+local startFarm, stopFarm, setAntiAFK, setAutoReset, setAutoShells, setPerfMode
+do
+    local Workspace = game:GetService("Workspace")
+    local Players = game:GetService("Players")
+    local RunService = game:GetService("RunService")
+    local TweenService = game:GetService("TweenService")
+    local UserInputService = game:GetService("UserInputService")
+    local VirtualUser = game:GetService("VirtualUser")
+    local TeleportService = game:GetService("TeleportService")
+    local HttpService = game:GetService("HttpService")
+    local ReplicatedStorage = game:GetService("ReplicatedStorage")
+    local Lighting = game:GetService("Lighting")
 
--- Gamepass Check (Elite check for Bag Size)
-local function CheckGamepass()
-    local success, owns = pcall(function()
-        return game:GetService("MarketplaceService"):UserOwnsGamePassAsync(LocalPlayer.UserId, 818078531)
-    end)
-    if success and owns then
-        MaxBagCapacity = 50
-    else
-        MaxBagCapacity = 40
+    local localPlayer = Players.LocalPlayer
+    local placeId = game.PlaceId
+    local jobId = game.JobId
+
+    local function notify(title, content, duration)
+        pcall(function()
+            if bc and bc.Notify then
+                bc:Notify(string.format("[%s] %s", tostring(title), tostring(content or "")), duration or 3)
+            end
+        end)
     end
-end
-CheckGamepass()
 
--- Helper: Get Humanoid Part Safely
-local function GetRootPart()
-    local char = LocalPlayer.Character
-    return char and char:FindFirstChild("HumanoidRootPart")
-end
+    local function getRoot(player)
+        player = player or localPlayer
+        if player and player.Character then
+            return player.Character:FindFirstChild("HumanoidRootPart")
+                or player.Character:FindFirstChild("PrimaryPart")
+                or player.Character:FindFirstChild("Torso")
+        end
+        return nil
+    end
 
--- Helper: Find Murderer
-local function FindMurderer()
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer and player.Character then
-            if player.Character:FindFirstChild("Knife") or (player:FindFirstChild("Backpack") and player.Backpack:FindFirstChild("Knife")) then
-                return player
+    local function getHumanoid(player)
+        player = player or localPlayer
+        if player and player.Character then
+            return player.Character:FindFirstChildOfClass("Humanoid")
+        end
+        return nil
+    end
+
+    local function inLobbyNow()
+        local pg = localPlayer and localPlayer:FindFirstChild("PlayerGui")
+        local mg = pg and pg:FindFirstChild("MainGUI")
+        local gm = mg and mg:FindFirstChild("Game")
+        if not gm then return true end
+        return gm:FindFirstChild("Inventory") == nil
+    end
+
+    local function getRoundTimer()
+        local timerPart = Workspace:FindFirstChild("RoundTimerPart")
+        if timerPart then
+            return tonumber(timerPart:GetAttribute("Time")) or 0
+        end
+        return 0
+    end
+
+    local function getCurrentMap()
+        for _, child in ipairs(Workspace:GetChildren()) do
+            if child:FindFirstChild("CoinAreas") or child:FindFirstChild("CoinContainer") then
+                return child
             end
         end
+        return nil
     end
-    return nil
-end
 
--- Fling Method (Extracted from source core logic)
-local function FlingPlayer(targetPlayer)
-    if not targetPlayer or not targetPlayer.Character then return end
-    
-    local myChar = LocalPlayer.Character
-    local myHumanoid = myChar and myChar:FindFirstChildOfClass("Humanoid")
-    local myRoot = GetRootPart()
-    local targetRoot = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
-    
-    if not (myChar and myHumanoid and myRoot and targetRoot) then return end
-    
-    local oldPos = myRoot.CFrame
-    workspace.FallenPartsDestroyHeight = 0/0
-    
-    local bv = Instance.new("BodyVelocity")
-    bv.Velocity = Vector3.new(900000000, 900000000, 900000000)
-    bv.MaxForce = Vector3.new(1/0, 1/0, 1/0)
-    bv.Parent = myRoot
-    
-    myHumanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
-    
-    -- Fast loop targeted execution sequence
-    local startFlingTime = tick()
-    while myRoot and targetRoot and (tick() - startFlingTime < 2) do
-        myRoot.CFrame = CFrame.new(targetRoot.Position) * CFrame.Angles(math.rad(90), 0, 0)
-        myRoot.Velocity = Vector3.new(90000000, 900000000, 90000000)
-        task.wait()
+    local function inActiveRound()
+        if inLobbyNow() then return false end
+        local hum = getHumanoid(localPlayer)
+        if not hum or hum.Health <= 0 then return false end
+        return getCurrentMap() ~= nil
     end
-    
-    bv:Destroy()
-    myHumanoid:SetStateEnabled(Enum.HumanoidStateType.Seated, true)
-    
-    -- Return back safely
-    myRoot.CFrame = oldPos
-    workspace.FallenPartsDestroyHeight = -500
-end
 
--- Scan for closest Items
-local function GetClosestItem()
-    local root = GetRootPart()
-    if not root then return nil, math.huge end
-    
-    local closest = nil
-    local minDistance = math.huge
-    
-    for _, container in pairs(workspace:GetChildren()) do
-        if container:FindFirstChild("CoinContainer") then
-            for _, item in pairs(container.CoinContainer:GetChildren()) do
-                if item:IsA("BasePart") and item:FindFirstChild("TouchInterest") then
-                    if item:GetAttribute("CoinID") ~= "Candy" then
-                        local dist = (root.Position - item.Position).Magnitude
-                        if dist < minDistance then minDistance = dist; closest = item end
-                    end
+    local function getMurderer()
+        for _, p in ipairs(Players:GetPlayers()) do
+            local bp = p:FindFirstChildOfClass("Backpack")
+            if bp and bp:FindFirstChild("Knife") then return p end
+            if p.Character and p.Character:FindFirstChild("Knife") then return p end
+        end
+        return nil
+    end
+
+    -- Coin skipping & failed tracker
+    local coinFails = {}
+    local coinSkips = {}
+
+    local function coinSkip(coin)
+        local t = coinSkips[coin]
+        if not t then return false end
+        if t < tick() then
+            coinSkips[coin] = nil
+            coinFails[coin] = nil
+            return false
+        end
+        return true
+    end
+
+    local function coinFailed(coin)
+        local n = (coinFails[coin] or 0) + 1
+        coinFails[coin] = n
+        if n >= 2 then
+            coinSkips[coin] = tick() + 20
+        end
+    end
+
+    local function coinReset()
+        coinFails = {}
+        coinSkips = {}
+    end
+
+    local function getClosestCoin(currentMap)
+        local root = getRoot(localPlayer)
+        if not root or not currentMap then return nil end
+        local container = currentMap:FindFirstChild("CoinContainer")
+        if not container then return nil end
+        local closest, closestDist = nil, math.huge
+        for _, coin in ipairs(container:GetChildren()) do
+            if coin.Name == "Coin_Server" and not coin:GetAttribute("Collected") and not coinSkip(coin) then
+                local dist = (root.Position - coin.Position).Magnitude
+                if dist < closestDist then
+                    closestDist = dist
+                    closest = coin
                 end
             end
         end
+        return closest
     end
-    return closest, minDistance
-end
 
--- Primary Farming Loop Thread
-task.spawn(function()
-    while true do
-        if Config.CoinAutofarm and RoundActive and not IsResetting then
-            local root = GetRootPart()
-            local item, dist = GetClosestItem()
-            
-            if item and root then
-                if dist > 150 then
-                    root.CFrame = item.CFrame
+    local function getBagCoins()
+        local ok, res = pcall(function()
+            local container
+            if not inLobbyNow() then
+                container = localPlayer.PlayerGui.MainGUI.Game.CoinBags.Container
+            else
+                container = localPlayer.PlayerGui.MainGUI.Lobby.Dock.CoinBags.Container
+            end
+            if not container then return 0 end
+            local activeBag = nil
+            for _, obj in ipairs(container:GetChildren()) do
+                if obj:IsA("GuiObject") and obj:FindFirstChild("CurrencyFrame") then
+                    if obj.Visible then
+                        activeBag = obj
+                        break
+                    elseif obj.Name == "Coin" and not activeBag then
+                        activeBag = obj
+                    end
+                end
+            end
+            if not activeBag then return 0 end
+            local full = activeBag:FindFirstChild("Full")
+            if full and full.Visible then return 999 end
+            local currFrame = activeBag:FindFirstChild("CurrencyFrame")
+            local icon = currFrame and currFrame:FindFirstChild("Icon")
+            local coinsLabel = icon and icon:FindFirstChild("Coins")
+            local txt = coinsLabel and coinsLabel.Text
+            if txt and (txt:lower():find("full") or txt:lower():find("max")) then
+                return 999
+            end
+            return tonumber(txt) or 0
+        end)
+        return (ok and res) or 0
+    end
+
+    -- Physics / Float / Noclip
+    local noclipConn = nil
+    local farmClipWas = {}
+
+    local function setFarmNoclip(enable)
+        if enable then
+            if not noclipConn then
+                noclipConn = RunService.Stepped:Connect(function()
+                    local char = localPlayer.Character
+                    if char then
+                        for _, part in ipairs(char:GetDescendants()) do
+                            if part:IsA("BasePart") and part.CanCollide then
+                                if farmClipWas[part] == nil then
+                                    farmClipWas[part] = true
+                                end
+                                part.CanCollide = false
+                            end
+                        end
+                    end
+                end)
+            end
+        else
+            if noclipConn then
+                noclipConn:Disconnect()
+                noclipConn = nil
+            end
+            for part, _ in pairs(farmClipWas) do
+                if part and part.Parent then
+                    pcall(function() part.CanCollide = true end)
+                end
+            end
+            farmClipWas = {}
+        end
+    end
+
+    local function setFarmFloat(enable)
+        local char = localPlayer.Character
+        local torso = char and (char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso"))
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        local root = getRoot(localPlayer)
+        if not torso or not hum or not root then return end
+
+        local gyro = torso:FindFirstChild("ODH Auto Farm BodyGyro")
+        local vel = torso:FindFirstChild("ODH Auto Farm BodyVelocity")
+
+        if enable then
+            if gyro or vel then return end
+            local cf = root.CFrame
+            local targetCF = CFrame.new(cf.X, cf.Y, cf.Z) * CFrame.Angles(math.pi/2, 0, math.pi/2)
+            setFarmNoclip(true)
+
+            local bg = Instance.new("BodyGyro")
+            bg.Name = "ODH Auto Farm BodyGyro"
+            bg.Parent = torso
+            bg.P = 90000
+            bg.MaxTorque = Vector3.new(9e9, 9e9, 9e9)
+            bg.CFrame = targetCF
+
+            local bv = Instance.new("BodyVelocity")
+            bv.Name = "ODH Auto Farm BodyVelocity"
+            bv.Parent = torso
+            bv.Velocity = Vector3.zero
+            bv.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+
+            root.CFrame = targetCF
+            hum.PlatformStand = true
+        else
+            if gyro then gyro:Destroy() end
+            if vel then vel:Destroy() end
+            hum.PlatformStand = false
+            setFarmNoclip(false)
+        end
+    end
+
+    local function teleportHome(currentMap)
+        currentMap = currentMap or getCurrentMap()
+        if not currentMap then return end
+        local spawns = currentMap:FindFirstChild("Spawns")
+        if not spawns then return end
+        local chosenSpawn = nil
+        for _, sp in ipairs(spawns:GetChildren()) do
+            if sp:IsA("BasePart") then
+                if sp.Name == "Spawn" or sp.Name == "PlayerSpawn" or sp.Name == "SpawnLocation" then
+                    chosenSpawn = sp
+                    break
                 else
-                    local tween = TweenService:Create(root, TweenInfo.new(dist / Config.FarmSpeed, Enum.EasingStyle.Linear), {CFrame = item.CFrame})
-                    tween:Play()
-                    repeat task.wait() until not (item:FindFirstChild("TouchInterest") and RoundActive and Config.CoinAutofarm)
-                    tween:Cancel()
-                end
-                TotalCollected = TotalCollected + 1
-            end
-        end
-        task.wait(0.2)
-    end
-end)
-
--- Anti-collision thread when farm is active
-RunService.Stepped:Connect(function()
-    if Config.CoinAutofarm and RoundActive and not IsResetting then
-        local char = LocalPlayer.Character
-        if char then
-            for _, part in ipairs(char:GetDescendants()) do
-                if part:IsA("BasePart") then part.CanCollide = false end
-            end
-        end
-    end
-end)
-
--- Remote Hook listeners (Round states & collection updates)
-local GameplayRemote = ReplicatedStorage:FindFirstChild("Remotes") and ReplicatedStorage.Remotes:FindFirstChild("Gameplay")
-if GameplayRemote then
-    local CoinCollected = GameplayRemote:FindFirstChild("CoinCollected")
-    local RoundStart = GameplayRemote:FindFirstChild("RoundStart")
-    local RoundEnd = GameplayRemote:FindFirstChild("RoundEndFade")
-    
-    if RoundStart then
-        RoundStart.OnClientEvent:Connect(function()
-            RoundActive = true
-            local root = GetRootPart()
-            if root then StartPosition = root.CFrame end
-        end)
-    end
-    
-    if RoundEnd then
-        RoundEnd.OnClientEvent:Connect(function()
-            RoundActive = false
-        end)
-    end
-    
-    if CoinCollected then
-        CoinCollected.OnClientEvent:Connect(function(itemType, scoreAmount)
-            if itemType == "Coin" then
-                CurrentBagCount = scoreAmount
-                
-                -- Actions when the Inventory Bag hits full capacity limits
-                if CurrentBagCount >= MaxBagCapacity then
-                    Config.CoinAutofarm = false
-                    
-                    -- Handle auto fling target
-                    if Config.AutoFling then
-                        local mud = FindMurderer()
-                        if mud then FlingPlayer(mud) end
-                    end
-                    
-                    -- Handle auto reset character routine
-                    if Config.AutoReset and not IsResetting then
-                        IsResetting = true
-                        local root = GetRootPart()
-                        if root and StartPosition then
-                            root.CFrame = StartPosition
-                            task.wait(0.5)
-                        end
-                        if LocalPlayer.Character then
-                            LocalPlayer.Character:BreakJoints()
-                        end
-                    end
+                    chosenSpawn = chosenSpawn or sp
                 end
             end
+        end
+        if not chosenSpawn then return end
+        local root = getRoot(localPlayer)
+        local hum = getHumanoid(localPlayer)
+        if root then
+            if hum then
+                hum.PlatformStand = false
+                hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+            end
+            root.Velocity = Vector3.zero
+            root.RotVelocity = Vector3.zero
+            root.CFrame = CFrame.new(chosenSpawn.Position.X, chosenSpawn.Position.Y + chosenSpawn.Size.Y / 2 + 4, chosenSpawn.Position.Z)
+        end
+    end
+
+    local function getUnderMapCF(currentMap)
+        currentMap = currentMap or getCurrentMap()
+        if not currentMap then return nil end
+        local spawns = currentMap:FindFirstChild("Spawns")
+        local pos = nil
+        if spawns then
+            for _, s in ipairs(spawns:GetChildren()) do
+                if s:IsA("BasePart") then
+                    pos = s.Position
+                    break
+                end
+            end
+        end
+        if not pos then
+            local ok, pivot = pcall(function() return currentMap:GetPivot() end)
+            if ok and pivot then pos = pivot.Position end
+        end
+        if not pos then return nil end
+        return CFrame.new(pos.X, pos.Y - 3.5, pos.Z) * CFrame.Angles(math.pi/2, 0, math.pi/2)
+    end
+
+    local function hideUnderMap(currentMap, root)
+        local cf = getUnderMapCF(currentMap)
+        if not cf then return false end
+        setFarmFloat(true)
+        if (root.Position - cf.Position).Magnitude > 5 then
+            root.Velocity = Vector3.zero
+            root.CFrame = cf
+        end
+        return true
+    end
+
+    -- SkidFling
+    local flingActive = false
+    local function flingPlayer(targetPlayer)
+        if flingActive then
+            notify("Fling Active!", "Wait for the current fling to finish!", 2)
+            return
+        end
+        if not targetPlayer or not targetPlayer.Character then
+            notify("Error!", "Could not find that player!", 2)
+            return
+        end
+        local targetHum = targetPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if not targetHum or targetHum.Sit then return end
+        local char = localPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        local root = hum and hum.RootPart
+        if not root then return end
+
+        flingActive = true
+        local originalCF = root.CFrame
+        local targetRoot = targetHum.RootPart
+        local targetHead = targetPlayer.Character:FindFirstChild("Head")
+
+        local function flingMove(part, offset, angles)
+            root.CFrame = CFrame.new(part.Position) * offset * angles
+            pcall(function() char:SetPrimaryPartCFrame(CFrame.new(part.Position) * offset * angles) end)
+            root.Velocity = Vector3.new(90000000, 900000000, 90000000)
+            root.RotVelocity = Vector3.new(900000000, 900000000, 900000000)
+        end
+
+        local bv = Instance.new("BodyVelocity")
+        bv.Name = "SkidFlingBV"
+        bv.Parent = root
+        bv.Velocity = Vector3.zero
+        bv.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+        hum:SetStateEnabled(Enum.HumanoidStateType.Seated, false)
+
+        local targetPart = targetRoot or targetHead
+        if targetPart then
+            local startT = tick()
+            local rotAngle = 0
+            while flingActive and (tick() - startT < 2.5) do
+                if not targetPart or not targetPart.Parent or not targetPlayer.Character then break end
+                if targetHum.Health <= 0 or hum.Health <= 0 then break end
+                if targetPart.Velocity.Magnitude > 500 then break end
+
+                rotAngle = rotAngle + 100
+                local md = targetHum.MoveDirection * targetPart.Velocity.Magnitude / 1.25
+                flingMove(targetPart, CFrame.new(0, 1.5, 0) + md, CFrame.Angles(math.rad(rotAngle), 0, 0))
+                task.wait()
+                flingMove(targetPart, CFrame.new(0, -1.5, 0) + md, CFrame.Angles(math.rad(rotAngle), 0, 0))
+                task.wait()
+                flingMove(targetPart, CFrame.new(2.25, 1.5, -2.25) + md, CFrame.Angles(math.rad(rotAngle), 0, 0))
+                task.wait()
+                flingMove(targetPart, CFrame.new(-2.25, -1.5, 2.25) + md, CFrame.Angles(math.rad(rotAngle), 0, 0))
+                task.wait()
+            end
+        end
+
+        bv:Destroy()
+        hum:SetStateEnabled(Enum.HumanoidStateType.Seated, true)
+
+        if originalCF then
+            for i = 1, 30 do
+                root.CFrame = originalCF * CFrame.new(0, 0.5, 0)
+                hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+                for _, c in ipairs(char:GetChildren()) do
+                    if c:IsA("BasePart") then
+                        c.Velocity = Vector3.zero
+                        c.RotVelocity = Vector3.zero
+                    end
+                end
+                task.wait()
+                if (root.Position - originalCF.Position).Magnitude < 25 then break end
+            end
+        end
+
+        flingActive = false
+    end
+
+    -- Knife Kill All
+    local function equipKnife()
+        local char = localPlayer.Character
+        if not char then return nil end
+        local knife = char:FindFirstChild("Knife")
+        if knife then return knife end
+        local bp = localPlayer:FindFirstChild("Backpack")
+        local bpKnife = bp and bp:FindFirstChild("Knife")
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if bpKnife and hum then
+            hum:EquipTool(bpKnife)
+            task.wait(0.1)
+            return char:FindFirstChild("Knife")
+        end
+        return nil
+    end
+
+    local function killAll()
+        if getMurderer() ~= localPlayer then return 0 end
+        local knife = equipKnife()
+        if not knife then return 0 end
+        local events = knife:FindFirstChild("Events")
+        local knifeStabbed = events and events:FindFirstChild("KnifeStabbed")
+        local handleTouched = events and events:FindFirstChild("HandleTouched")
+        if not (knifeStabbed and handleTouched) then return 0 end
+
+        pcall(function() knifeStabbed:FireServer() end)
+
+        local count = 0
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= localPlayer and p.Character then
+                local hum = p.Character:FindFirstChildOfClass("Humanoid")
+                local hrp = p.Character:FindFirstChild("HumanoidRootPart") or p.Character:FindFirstChild("Torso")
+                if hum and hum.Health > 0 and hrp then
+                    pcall(function() handleTouched:FireServer(hrp) end)
+                    count = count + 1
+                end
+            end
+        end
+        return count
+    end
+
+    -- Anti-AFK
+    local afkConn = nil
+    setAntiAFK = function(enable)
+        if enable then
+            if not afkConn then
+                afkConn = localPlayer.Idled:Connect(function()
+                    pcall(function()
+                        VirtualUser:CaptureController()
+                        VirtualUser:ClickButton2(Vector2.new())
+                    end)
+                end)
+            end
+        else
+            if afkConn then
+                afkConn:Disconnect()
+                afkConn = nil
+            end
+        end
+    end
+
+    -- Auto Reset when bag full
+    local autoResetThread = nil
+    setAutoReset = function(enable)
+        if enable then
+            if not autoResetThread then
+                autoResetThread = task.spawn(function()
+                    while Toggles and Toggles.AutoResetWhenBagFull and Toggles.AutoResetWhenBagFull.Value do
+                        task.wait(1)
+                        pcall(function()
+                            if getBagCoins() >= 999 then
+                                local hum = getHumanoid(localPlayer)
+                                if hum then hum.Health = 0 end
+                            end
+                        end)
+                    end
+                    autoResetThread = nil
+                end)
+            end
+        else
+            autoResetThread = nil
+        end
+    end
+
+    -- Auto Claim Shells
+    local shellsThread = nil
+    local function claimRewardPopup()
+        local pg = localPlayer:FindFirstChild("PlayerGui")
+        if not pg then return false end
+        local claimBtn = nil
+        local cp = pg:FindFirstChild("CrossPlatform")
+        local medium = cp and cp:FindFirstChild("NewItem") and cp.NewItem:FindFirstChild("Medium")
+        if medium and medium.Visible then
+            claimBtn = medium:FindFirstChild("Container") and medium.Container:FindFirstChild("Claim")
+        else
+            local mg = pg:FindFirstChild("MainGUI") and pg.MainGUI:FindFirstChild("Game")
+            local ni = mg and mg:FindFirstChild("NewItem")
+            if ni and ni.Visible then
+                claimBtn = ni:FindFirstChild("Container") and ni.Container:FindFirstChild("Claim")
+            end
+        end
+
+        if not claimBtn then return false end
+
+        if getconnections then
+            for _, ev in ipairs({ "Activated", "MouseButton1Click" }) do
+                local ok, conns = pcall(getconnections, claimBtn[ev])
+                if ok and conns and #conns > 0 then
+                    for _, conn in ipairs(conns) do
+                        pcall(function() conn:Fire() end)
+                    end
+                    return true
+                end
+            end
+        end
+
+        local vim = game:GetService("VirtualInputManager")
+        local absPos = claimBtn.AbsolutePosition
+        local absSize = claimBtn.AbsoluteSize
+        local x = absPos.X + absSize.X / 2
+        local y = absPos.Y + absSize.Y / 2 + 36
+        vim:SendMouseButtonEvent(x, y, 0, true, game, 1)
+        task.wait(0.05)
+        vim:SendMouseButtonEvent(x, y, 0, false, game, 1)
+        return true
+    end
+
+    setAutoShells = function(enable)
+        if enable then
+            if not shellsThread then
+                shellsThread = task.spawn(function()
+                    while Toggles and Toggles.AutoClaimShells and Toggles.AutoClaimShells.Value do
+                        task.wait(0.5)
+                        pcall(claimRewardPopup)
+                    end
+                    shellsThread = nil
+                end)
+            end
+        else
+            shellsThread = nil
+        end
+    end
+
+    -- Server Hop Watcher & Populated Hop
+    local hopping = false
+    local function populatedHop()
+        if hopping then return end
+        hopping = true
+        notify("Server Empty", "Hopping to populated server...", 3)
+        task.wait(0.5)
+
+        local bestServer = nil
+        local cursor = ""
+        local attempts = 0
+
+        local function httpGetJson(url)
+            local ok, body = pcall(function()
+                if syn and syn.request then return syn.request({ Url = url, Method = "GET" }).Body end
+                if request then return request({ Url = url, Method = "GET" }).Body end
+                if http_request then return http_request({ Url = url, Method = "GET" }).Body end
+                return game:HttpGet(url)
+            end)
+            if ok and body then
+                local decOk, data = pcall(HttpService.JSONDecode, HttpService, body)
+                return decOk and data or nil
+            end
+            return nil
+        end
+
+        while attempts < 4 do
+            attempts = attempts + 1
+            local url = "https://games.roblox.com/v1/games/" .. placeId .. "/servers/Public?sortOrder=Desc&limit=100"
+            if cursor ~= "" then url = url .. "&cursor=" .. cursor end
+            local res = httpGetJson(url)
+            if res and res.data then
+                for _, s in ipairs(res.data) do
+                    if s.id ~= jobId and s.playing and s.maxPlayers and s.playing < s.maxPlayers then
+                        if not bestServer or s.playing > bestServer.playing then
+                            bestServer = s
+                        end
+                    end
+                end
+                cursor = res.nextPageCursor or ""
+                if cursor == "" then break end
+            else
+                break
+            end
+        end
+
+        if bestServer then
+            notify("Hopping", "Joining server with " .. bestServer.playing .. " players...", 3)
+            task.wait(0.5)
+            pcall(function()
+                TeleportService:TeleportToPlaceInstance(placeId, bestServer.id)
+            end)
+        else
+            pcall(function()
+                TeleportService:Teleport(placeId)
+            end)
+        end
+        task.wait(10)
+        hopping = false
+    end
+
+    local hopWatchThread = nil
+    local function startFarmHopWatch()
+        if hopWatchThread then return end
+        hopWatchThread = task.spawn(function()
+            local lowPlayerSeconds = 0
+            while Toggles and Toggles.CoinAutofarm and Toggles.CoinAutofarm.Value do
+                task.wait(3)
+                if not (Toggles.FarmDeadHop and Toggles.FarmDeadHop.Value) then
+                    lowPlayerSeconds = 0
+                    continue
+                end
+                if #Players:GetPlayers() < 2 then
+                    lowPlayerSeconds = lowPlayerSeconds + 3
+                    if lowPlayerSeconds >= 15 then
+                        populatedHop()
+                        lowPlayerSeconds = 0
+                    end
+                else
+                    lowPlayerSeconds = 0
+                end
+            end
+            hopWatchThread = nil
         end)
     end
+
+    -- Discord Webhook Sender
+    local function sendWebhookPayload(url, jsonBody)
+        local req = syn and syn.request or request or http_request or (http and http.request)
+        if not req then return false, "No request function" end
+        local ok, res = pcall(req, {
+            Url = url,
+            Method = "POST",
+            Headers = { ["Content-Type"] = "application/json" },
+            Body = jsonBody,
+        })
+        if not ok then return false, "Request error" end
+        local code = tonumber(type(res) == "table" and (res.StatusCode or res.Status)) or 0
+        return (code == 200 or code == 204), tostring(code)
+    end
+
+    local function postDiscordEmbed(title, description, fields, thumb)
+        local url = Options and Options.DiscordWebhook and Options.DiscordWebhook.Value or ""
+        url = url:gsub("^%s+", ""):gsub("%s+$", "")
+        if url == "" or not (Toggles and Toggles.DiscordSender and Toggles.DiscordSender.Value) then return end
+
+        local embed = {
+            title = title,
+            description = description,
+            color = 0x2ECC71,
+            timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+            author = {
+                name = localPlayer.Name .. " (" .. localPlayer.DisplayName .. ")",
+                url = "https://www.roblox.com/users/" .. tostring(localPlayer.UserId) .. "/profile",
+            },
+            footer = { text = "Server Job: " .. tostring(game.JobId) },
+            fields = fields or {},
+        }
+        if thumb then embed.thumbnail = { url = thumb } end
+
+        local payload = HttpService:JSONEncode({
+            username = "Creep.cc Autofarm",
+            embeds = { embed }
+        })
+
+        task.spawn(function()
+            sendWebhookPayload(url, payload)
+        end)
+    end
+
+    -- Performance Mode
+    local perfStash = { parts = {}, lighting = nil }
+    setPerfMode = function(enable)
+        if enable then
+            if not perfStash.lighting then
+                perfStash.lighting = {
+                    GlobalShadows = Lighting.GlobalShadows,
+                    ShadowSoftness = Lighting.ShadowSoftness,
+                }
+                Lighting.GlobalShadows = false
+                Lighting.ShadowSoftness = 0
+            end
+            for _, obj in ipairs(Workspace:GetDescendants()) do
+                if obj:IsA("BasePart") and not (localPlayer.Character and obj:IsDescendantOf(localPlayer.Character)) then
+                    if not perfStash.parts[obj] then
+                        perfStash.parts[obj] = { Material = obj.Material, CastShadow = obj.CastShadow }
+                        obj.Material = Enum.Material.SmoothPlastic
+                        obj.CastShadow = false
+                    end
+                elseif obj:IsA("Decal") or obj:IsA("Texture") then
+                    obj.Transparency = 1
+                elseif obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Fire") or obj:IsA("Smoke") or obj:IsA("Sparkles") then
+                    obj.Enabled = false
+                end
+            end
+        else
+            if perfStash.lighting then
+                Lighting.GlobalShadows = perfStash.lighting.GlobalShadows
+                Lighting.ShadowSoftness = perfStash.lighting.ShadowSoftness
+                perfStash.lighting = nil
+            end
+            for part, data in pairs(perfStash.parts) do
+                if part and part.Parent then
+                    pcall(function()
+                        part.Material = data.Material
+                        part.CastShadow = data.CastShadow
+                    end)
+                end
+            end
+            perfStash.parts = {}
+            for _, obj in ipairs(Workspace:GetDescendants()) do
+                if obj:IsA("Decal") or obj:IsA("Texture") then
+                    obj.Transparency = 0
+                elseif obj:IsA("ParticleEmitter") or obj:IsA("Trail") or obj:IsA("Fire") or obj:IsA("Smoke") or obj:IsA("Sparkles") then
+                    obj.Enabled = true
+                end
+            end
+        end
+    end
+
+    -- Auto Open Boxes
+    local BOXES = {
+        { "Summer2026Box", "Summer Box '26" },
+        { "MysteryBox1",   "Mystery Box #1" },
+        { "MysteryBox2",   "Mystery Box #2" },
+        { "KnifeBox1",     "Knife Box #1" },
+        { "KnifeBox2",     "Knife Box #2" },
+        { "KnifeBox3",     "Knife Box #3" },
+        { "KnifeBox4",     "Knife Box #4" },
+        { "KnifeBox5",     "Knife Box #5" },
+        { "GunBox1",       "Gun Box #1" },
+        { "GunBox2",       "Gun Box #2" },
+        { "GunBox3",       "Gun Box #3" },
+        { "MLG Box",       "Rainbow Box" },
+    }
+    local BOX_CURRENCY = { Summer2026Box = "SummerKey2026" }
+
+    local function getOwnedMaterials()
+        local ok, prof = pcall(require, ReplicatedStorage.Modules.ProfileData)
+        if not ok or type(prof) ~= "table" then return nil end
+        local mat = prof.Materials and prof.Materials.Owned
+        return type(mat) == "table" and mat or nil
+    end
+
+    local function getBoxPrice(boxName)
+        local cur = BOX_CURRENCY[boxName] or "Coins"
+        local ok, shop = pcall(require, ReplicatedStorage.Database.Sync.NewShop)
+        if not ok or type(shop) ~= "table" then return cur, nil end
+        local item = shop[boxName]
+        local price = type(item) == "table" and type(item.Price) == "table" and item.Price or nil
+        return cur, price and tonumber(price[cur]) or nil
+    end
+
+    local function getBoxFunds(curName)
+        local owned = getOwnedMaterials()
+        if not owned then return nil end
+        return tonumber(owned[curName]) or 0
+    end
+
+    local function openBoxRemote(boxName)
+        local rem = ReplicatedStorage:FindFirstChild("Remotes")
+        rem = rem and rem:FindFirstChild("Shop")
+        rem = rem and rem:FindFirstChild("OpenCrate")
+        if not rem then return nil, "OpenCrate remote missing" end
+        local cur = BOX_CURRENCY[boxName] or "Coins"
+        local ok, res = pcall(function()
+            return rem:InvokeServer(boxName, "MysteryBox", cur)
+        end)
+        if not ok then return nil, tostring(res) end
+        return res
+    end
+
+    local activeBoxLoops = {}
+    local function startBoxLoop(boxId, boxName, toggleName)
+        if activeBoxLoops[boxId] then return end
+        activeBoxLoops[boxId] = true
+
+        task.spawn(function()
+            local openedCount = 0
+            while Toggles and Toggles[toggleName] and Toggles[toggleName].Value do
+                local cur, price = getBoxPrice(boxId)
+                local funds = getBoxFunds(cur)
+                if price and funds and funds < price then
+                    task.wait(5)
+                else
+                    local res, err = openBoxRemote(boxId)
+                    if not res then
+                        local f = getBoxFunds(cur)
+                        if price and f and f < price then
+                            task.wait(5)
+                        else
+                            if Toggles[toggleName] then Toggles[toggleName]:SetValue(false) end
+                            notify(boxName, "Stopped: " .. (err or "server refused"), 4)
+                            break
+                        end
+                    else
+                        openedCount = openedCount + 1
+                        if Toggles and Toggles.DiscordSender and Toggles.DiscordSender.Value then
+                            postDiscordEmbed("Opened " .. boxName, "Successfully opened " .. boxName .. " (#" .. openedCount .. ")", {
+                                { name = "Box", value = boxName, inline = true },
+                                { name = "Reward", value = tostring(res), inline = true },
+                            })
+                        end
+                        task.wait(1)
+                    end
+                end
+            end
+            activeBoxLoops[boxId] = nil
+        end)
+    end
+
+    -- Main Autofarm State & Loop
+    local farmRunning = false
+    local farmTween = nil
+    local lastMap = nil
+    local sawCoins = false
+    local flingDoneFired = false
+    local killFired = false
+    local targetCoin = nil
+    local farmTargetTime = tick()
+    local stuckCoin = nil
+    local stuckTime = 0
+
+    stopFarm = function()
+        farmRunning = false
+        if farmTween then
+            pcall(function() farmTween:Cancel() end)
+            farmTween = nil
+        end
+        setFarmFloat(false)
+        if inActiveRound() then
+            pcall(teleportHome)
+        end
+        task.spawn(function()
+            task.wait(0.35)
+            setFarmFloat(false)
+            if inActiveRound() then pcall(teleportHome) end
+        end)
+    end
+
+    local function finishFarmAction()
+        if farmTween then
+            farmTween:Cancel()
+            farmTween = nil
+        end
+        setFarmFloat(false)
+
+        -- Fling Murderer
+        if Toggles and Toggles.FlingMurdererWhenDone and Toggles.FlingMurdererWhenDone.Value and not flingDoneFired then
+            local murd = getMurderer()
+            if murd and murd ~= localPlayer then
+                flingDoneFired = true
+                task.spawn(function()
+                    if Toggles.AutoResetWhenBagFull and Toggles.AutoResetWhenBagFull.Value then
+                        local hum = getHumanoid(localPlayer)
+                        if hum then hum.Health = 0 end
+                        local startT = tick()
+                        while tick() - startT < 10 do
+                            task.wait(0.2)
+                            local c = localPlayer.Character
+                            local h = c and c:FindFirstChildOfClass("Humanoid")
+                            if h and h.Health > 0 and c:FindFirstChild("HumanoidRootPart") then break end
+                        end
+                        task.wait(0.6)
+                        murd = getMurderer()
+                    end
+                    if murd and murd ~= localPlayer then
+                        pcall(flingPlayer, murd)
+                    end
+                end)
+            end
+        end
+
+        -- Kill All When Full
+        if Toggles and Toggles.KillAllWhenBagFull and Toggles.KillAllWhenBagFull.Value and not killFired then
+            if getMurderer() == localPlayer then
+                killFired = true
+                task.spawn(function()
+                    pcall(killAll)
+                end)
+            end
+        end
+    end
+
+    startFarm = function()
+        if farmRunning then return end
+        farmRunning = true
+        startFarmHopWatch()
+
+        task.spawn(function()
+            while farmRunning and Toggles and Toggles.CoinAutofarm and Toggles.CoinAutofarm.Value do
+                task.wait(0.1)
+                pcall(function()
+                    if not farmRunning then return end
+                    local root = getRoot(localPlayer)
+                    local hum = getHumanoid(localPlayer)
+                    if not root or not hum or hum.Health <= 0 then
+                        return
+                    end
+
+                    local curMap = getCurrentMap()
+                    if curMap ~= lastMap then
+                        lastMap = curMap
+                        sawCoins = false
+                        flingDoneFired = false
+                        killFired = false
+                        coinReset()
+                    end
+
+                    if not curMap then
+                        setFarmFloat(false)
+                        return
+                    end
+
+                    -- Check round timer (if round not active, stand on spawn)
+                    if getRoundTimer() <= 0 then
+                        setFarmFloat(false)
+                        return
+                    end
+
+                    -- Check bag capacity (40 normal, 50 elite)
+                    local maxBag = localPlayer:GetAttribute("Elite") and 50 or 40
+                    local bagCoins = getBagCoins()
+                    if bagCoins >= maxBag or bagCoins >= 999 then
+                        finishFarmAction()
+                        return
+                    end
+
+                    -- Find next coin (before coins spawn, stand where spawned)
+                    local coin = getClosestCoin(curMap)
+                    if coin then
+                        sawCoins = true
+                        if coin ~= targetCoin or (targetCoin and targetCoin:GetAttribute("Collected")) then
+                            targetCoin = coin
+                            farmTargetTime = tick()
+                            if farmTween then
+                                farmTween:Cancel()
+                                farmTween = nil
+                            end
+                            setFarmFloat(true)
+
+                            local farmSpeed = (Options and Options.FarmSpeed and Options.FarmSpeed.Value) or 20
+                            local dist = (root.Position - coin.Position).Magnitude
+                            local duration = math.clamp(dist / farmSpeed, 0.05, 15)
+
+                            root.Velocity = Vector3.zero
+                            local coinCF = coin.CFrame
+                            local targetCF = CFrame.new(coinCF.X, coinCF.Y - 3.5, coinCF.Z) * CFrame.Angles(math.pi/2, 0, math.pi/2)
+
+                            farmTween = TweenService:Create(root, TweenInfo.new(duration, Enum.EasingStyle.Linear), {
+                                CFrame = targetCF
+                            })
+                            farmTween:Play()
+                            root.Velocity = Vector3.zero
+                        else
+                            local dist = (root.Position - coin.Position).Magnitude
+                            if dist <= 6 and not coin:GetAttribute("Collected") then
+                                coin.CFrame = CFrame.new(root.Position + Vector3.new(math.random(-80, 80)/100, math.random(-50, 300)/100, math.random(-80, 80)/100))
+                                if (coin.Position - root.Position).Magnitude > 0.1 then
+                                    root.CFrame = root.CFrame * CFrame.new(0, math.random(-20, 20)/100, math.random(-20, 20)/100)
+                                end
+                                if stuckCoin ~= coin then
+                                    stuckCoin = coin
+                                    stuckTime = tick()
+                                end
+                                if tick() - stuckTime > 2 then
+                                    stuckCoin = nil
+                                    stuckTime = 0
+                                    targetCoin = nil
+                                end
+                            elseif dist > 6 then
+                                if tick() - farmTargetTime > 4 then
+                                    coinFailed(coin)
+                                    targetCoin = nil
+                                    stuckCoin = nil
+                                    stuckTime = 0
+                                end
+                            end
+                        end
+                    else
+                        if sawCoins then
+                            finishFarmAction()
+                        end
+                    end
+                end)
+            end
+            stopFarm()
+        end)
+    end
+
+    -- Mid-round death handler & round event signals
+    local diedMidRound = false
+    task.spawn(function()
+        localPlayer.CharacterAdded:Connect(function(char)
+            local hum = char:WaitForChild("Humanoid", 5)
+            if hum then
+                hum.Died:Connect(function()
+                    local murd = getMurderer()
+                    diedMidRound = (murd ~= nil and murd ~= localPlayer)
+                end)
+            end
+
+            if diedMidRound and Toggles and Toggles.FlingMurdererWhenDone and Toggles.FlingMurdererWhenDone.Value and not flingDoneFired then
+                diedMidRound = false
+                task.spawn(function()
+                    task.wait(1.2)
+                    local murd = getMurderer()
+                    if murd and murd ~= localPlayer then
+                        flingDoneFired = true
+                        notify("Out Of The Round", "Flinging " .. murd.Name .. "...", 3)
+                        pcall(flingPlayer, murd)
+                    end
+                end)
+            end
+        end)
+
+        local remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
+        local gameplay = remotes and remotes:WaitForChild("Gameplay", 10)
+        if gameplay then
+            local victoryScreen = gameplay:FindFirstChild("VictoryScreen")
+            if victoryScreen then
+                victoryScreen.OnClientEvent:Connect(function(p1, roundRole, roundWin)
+                    if Toggles and Toggles.DiscordSender and Toggles.DiscordSender.Value then
+                        local fields = {
+                            { name = "Round Outcome", value = tostring(roundWin or "Over"), inline = true },
+                            { name = "Final Role", value = tostring(roundRole or "Unknown"), inline = true },
+                        }
+                        postDiscordEmbed("Round Finished", "The game round has ended.", fields)
+                    end
+                end)
+            end
+        end
+    end)
+
+    -- UI SECTION: Tab & Groupboxes
+    local FarmMain = ch.Autofarm:AddLeftGroupbox('Coin Autofarm')
+    local FarmSettings = ch.Autofarm:AddRightGroupbox('Settings')
+    local FarmWebhook = ch.Autofarm:AddLeftGroupbox('Discord Webhook')
+    local FarmBoxes = ch.Autofarm:AddRightGroupbox('Auto Open Boxes')
+
+    -- Left: Coin Autofarm
+    FarmMain:AddToggle('CoinAutofarm', {
+        Text = 'Coin Autofarm',
+        Default = true,
+        Tooltip = 'Walks you around picking up coins.',
+        Callback = function(Value)
+            if Value then
+                startFarm()
+                notify("Autofarm Started!", "Farming coins!", 2)
+            else
+                stopFarm()
+                notify("Autofarm Stopped!", "Stopped farming.", 2)
+            end
+        end,
+    })
+
+    FarmMain:AddSlider('FarmSpeed', {
+        Text = 'Farm Speed',
+        Default = 20,
+        Min = 5,
+        Max = 25,
+        Rounding = 0,
+        Suffix = ' m/s',
+        Tooltip = 'Speed at which you fly to coins',
+        Callback = function() end,
+    })
+
+    -- Right: Settings
+    FarmSettings:AddToggle('FarmPerfMaster', {
+        Text = 'Performance Mode',
+        Default = false,
+        Tooltip = 'Strips textures, shadows, and particles for maximum framerate.',
+        Callback = function(Value)
+            setPerfMode(Value)
+        end,
+    })
+
+    FarmSettings:AddToggle('FarmDeadHop', {
+        Text = 'Hop When Server Dies',
+        Default = true,
+        Tooltip = 'Hops to a fresh server when this one empties out mid-farm.',
+        Callback = function() end,
+    })
+
+    FarmSettings:AddToggle('AntiAFK', {
+        Text = 'Anti-AFK',
+        Default = true,
+        Tooltip = 'Prevents you from getting AFK kicked.',
+        Callback = function(Value)
+            setAntiAFK(Value)
+            notify(Value and "Anti-AFK Enabled!" or "Anti-AFK Disabled!", Value and "You can go AFK now!" or "AFK protection off.", 2)
+        end,
+    })
+
+    FarmSettings:AddToggle('AutoResetWhenBagFull', {
+        Text = 'Auto-Reset When Bag Full',
+        Default = true,
+        Tooltip = 'Resets you once your coin bag is full',
+        Callback = function(Value)
+            setAutoReset(Value)
+        end,
+    })
+
+    FarmSettings:AddToggle('AutoClaimShells', {
+        Text = 'Auto Claim Shells',
+        Default = false,
+        Tooltip = 'Claims the end-of-round reward popup for you',
+        Callback = function(Value)
+            setAutoShells(Value)
+            notify(Value and "Auto Claim Shells On!" or "Auto Claim Shells Off!", Value and "Rewards claim themselves." or "Claim them yourself.", 2)
+        end,
+    })
+
+    FarmSettings:AddToggle('FlingMurdererWhenDone', {
+        Text = 'Fling Murderer When Done',
+        Default = false,
+        Tooltip = 'Yeets the murderer once your bag is full or coins run out',
+        Callback = function(Value)
+            if Value then flingDoneFired = false end
+        end,
+    })
+
+    FarmSettings:AddToggle('KillAllWhenBagFull', {
+        Text = 'Kill All When Bag Full',
+        Default = false,
+        Tooltip = 'Stabs everyone once your bag fills up. Murderer only.',
+        Callback = function(Value)
+            if Value then killFired = false end
+        end,
+    })
+
+    -- Left: Discord Webhook
+    FarmWebhook:AddInput('DiscordWebhook', {
+        Default = '',
+        Numeric = false,
+        Finished = false,
+        Text = 'Webhook URL',
+        Tooltip = 'Paste a Discord webhook URL to log rounds and rewards.',
+        Placeholder = 'https://discord.com/api/webhooks/...',
+        Callback = function() end,
+    })
+
+    FarmWebhook:AddToggle('DiscordSender', {
+        Text = 'Start Sender',
+        Default = false,
+        Tooltip = 'Starts posting farm events to the webhook.',
+        Callback = function(Value)
+            if Value then
+                postDiscordEmbed("Creep.cc Logger Started", "Logging started for **" .. localPlayer.DisplayName .. "**.", {
+                    { name = "User ID", value = tostring(localPlayer.UserId), inline = true },
+                    { name = "Status", value = "Active", inline = true },
+                })
+                notify("Sender Started", "Posted opening message to webhook.", 3)
+            end
+        end,
+    })
+
+    FarmWebhook:AddButton('Test Webhook', function()
+        postDiscordEmbed("Test Webhook", "This is a test notification from Creep.cc Autofarm.")
+        notify("Test Sent", "Sent test embed to webhook.", 2)
+    end)
+
+    -- Right: Auto Open Boxes
+    for _, box in ipairs(BOXES) do
+        local boxId = box[1]
+        local boxTitle = box[2]
+        local flagName = 'AutoBox_' .. boxId:gsub('%W', '_')
+        FarmBoxes:AddToggle(flagName, {
+            Text = 'Auto Open ' .. boxTitle,
+            Default = false,
+            Tooltip = 'Automatically opens ' .. boxTitle .. ' when affordable.',
+            Callback = function(Value)
+                if Value then
+                    startBoxLoop(boxId, boxTitle, flagName)
+                end
+            end,
+        })
+    end
+
+    -- Auto-start farm on load if enabled
+    task.spawn(function()
+        task.wait(0.25)
+        if Toggles and Toggles.CoinAutofarm and Toggles.CoinAutofarm.Value then
+            startFarm()
+        end
+    end)
 end
 
-LocalPlayer.CharacterAdded:Connect(function()
-    CurrentBagCount = 0
-    IsResetting = false
-    CheckGamepass()
-end)
+--------------------------------------------------------------------------------
+-- SETTINGS TAB & SAVE MANAGER
+--------------------------------------------------------------------------------
+local bj = ch.Settings:AddLeftGroupbox('Menu')
+bj:AddButton('Unload', function() bc:Unload() end)
+bj:AddLabel('Menu bind'):AddKeyPicker('MenuKeybind', {
+    Default = 'RightShift',
+    NoUI = true,
+    Text = 'Menu keybind',
+    ChangedCallback = function()
+        bc.ToggleKeybind = Options.MenuKeybind
+        if not bc.SetKeybindTransparency then
+            game:GetService('UserInputService').InputBegan:Connect(function(Input)
+                if bc.Unloaded then return end
+                if Input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+                local Bind = bc.ToggleKeybind
+                local KeyName = (type(Bind) == 'table' and Bind.Value) or Bind
+                if KeyName and Input.KeyCode.Name == KeyName then
+                    task.spawn(bc.Toggle)
+                end
+            end)
+        end
+    end,
+})
+bj:AddToggle('ShowKeybinds', { Text = 'Show Keybinds', Default = false, Callback = function(v) bc.KeybindFrame.Visible = v end })
+bj:AddToggle('ShowWatermark', { Text = 'Show Watermark', Default = true,  Callback = function(v) bc:SetWatermarkVisibility(v) end })
 
--- ==========================================
--- BUILD NEW CUSTOM USER INTERFACE SYSTEM
--- ==========================================
+-- background adjustors
+local bg = ch.Settings:AddLeftGroupbox('Background')
+if bc.AddBlurSlider then bc:AddBlurSlider(bg) end
+if bc.AddDarkenSlider then bc:AddDarkenSlider(bg) end
+if bc.AddKeybindTransparencySlider then
+    bc:AddKeybindTransparencySlider(bg)
+elseif bc.KeybindFrame then
+    bg:AddSlider('KeybindTransparency', {
+        Text     = 'Keybind Transparency',
+        Default  = 0,
+        Min      = 0,
+        Max      = 100,
+        Rounding = 0,
+        Suffix   = '%',
+        Callback = function(Value)
+            local Alpha = Value / 100
+            local Outer = bc.KeybindFrame
+            if Outer then
+                Outer.BackgroundTransparency = Alpha
+                Outer.BorderSizePixel = Alpha >= 1 and 0 or 1
+            end
+            local Inner = bc.KeybindInner or (Outer and Outer:FindFirstChildOfClass('Frame'))
+            if Inner then
+                Inner.BackgroundTransparency = Alpha
+                Inner.BorderSizePixel = Alpha >= 1 and 0 or 1
+                pcall(function()
+                    Inner:FindFirstChildOfClass('Frame').BackgroundTransparency = Alpha
+                end)
+            end
+        end,
+    })
+end
 
-local ScreenGui = Instance.new("ScreenGui")
-local MainFrame = Instance.new("Frame")
-local TitleLabel = Instance.new("TextLabel")
-local UIListLayout = Instance.new("UIListLayout")
-local ToggleCoin = Instance.new("TextButton")
-local ToggleReset = Instance.new("TextButton")
-local ToggleFling = Instance.new("TextButton")
+-- notification options
+if bc.NotifyConfig then
+    local ng = ch.Settings:AddLeftGroupbox('Notifications')
+    ng:AddDropdown('NotificationBarSide', {
+        Text = 'Notification Accent Bar Position',
+        Default = bc.NotifyConfig.BarSide or 'Bottom',
+        Values = { 'Top', 'Bottom', 'Left', 'Right' },
+        Callback = function(Value)
+            bc.NotifyConfig.BarSide = Value
+            if bc.ConfigureNotifications then bc:ConfigureNotifications() end
+        end,
+    })
+    ng:AddDropdown('NotificationAlignment', {
+        Text = 'Notification Alignment',
+        Default = bc.NotifyConfig.Alignment or 'Center',
+        Values = { 'Left', 'Center', 'Right' },
+        Callback = function(Value)
+            bc.NotifyConfig.Alignment = Value
+            if bc.ConfigureNotifications then bc:ConfigureNotifications() end
+        end,
+    })
+    ng:AddSlider('NotificationPosX', {
+        Text = 'Position X (%)', Default = bc.NotifyConfig.PosX or 50, Min = 0, Max = 100, Rounding = 0,
+        Callback = function(Value)
+            bc.NotifyConfig.PosX = Value
+            if bc.ConfigureNotifications then bc:ConfigureNotifications() end
+        end,
+    })
+    ng:AddSlider('NotificationPosY', {
+        Text = 'Position Y (%)', Default = bc.NotifyConfig.PosY or 60, Min = 0, Max = 100, Rounding = 0,
+        Callback = function(Value)
+            bc.NotifyConfig.PosY = Value
+            if bc.ConfigureNotifications then bc:ConfigureNotifications() end
+        end,
+    })
+    ng:AddSlider('NotificationTransparency', {
+        Text = 'Notification Transparency (%)', Default = bc.NotifyConfig.Transparency or 60, Min = 0, Max = 100, Rounding = 0,
+        Callback = function(Value)
+            bc.NotifyConfig.Transparency = Value
+            if bc.ConfigureNotifications then bc:ConfigureNotifications() end
+        end,
+    })
+    ng:AddSlider('NotificationMaxHeight', {
+        Text = 'Max Height', Default = bc.NotifyConfig.MaxHeight or 200, Min = 50, Max = 500, Rounding = 0, Suffix = ' px',
+        Callback = function(Value)
+            bc.NotifyConfig.MaxHeight = Value
+            if bc.ConfigureNotifications then bc:ConfigureNotifications() end
+        end,
+    })
+    ng:AddToggle('NotificationClipDescendants', {
+        Text = 'Clip Descendants', Default = bc.NotifyConfig.ClipDescendants or false,
+        Callback = function(Value)
+            bc.NotifyConfig.ClipDescendants = Value
+            if bc.ConfigureNotifications then bc:ConfigureNotifications() end
+        end,
+    })
+    ng:AddDropdown('NotificationSortOrder', {
+        Text = 'Sort Order', Default = bc.NotifyConfig.SortOrder or 'Time',
+        Values = { 'Time', 'Text Length' },
+        Callback = function(Value)
+            bc.NotifyConfig.SortOrder = Value
+        end,
+    })
+    ng:AddButton('Test Notification', function()
+        bc:Notify('Test Notification')
+    end)
+end
 
--- Protect UI
-ScreenGui.Name = "CustomFarmUI_" .. math.random(100,999)
+--------------------------------------------------------------------------------
+-- MOBILE TOGGLE & UNLOCK UI BUTTONS
+--------------------------------------------------------------------------------
+local UserInputService = game:GetService("UserInputService")
+local mobileGui = Instance.new("ScreenGui")
+mobileGui.Name = "CreepMobileUI"
+mobileGui.ResetOnSpawn = false
+mobileGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+local targetGuiParent = (gethui and gethui()) or game:GetService("CoreGui")
 pcall(function()
-    if syn and syn.protect_gui then syn.protect_gui(ScreenGui) end
+    mobileGui.Parent = targetGuiParent
 end)
-ScreenGui.Parent = game:GetService("CoreGui")
-
--- Design Main Panel Frame (Height adjusted to 220)
-MainFrame.Name = "MainFrame"
-MainFrame.Size = UDim2.new(0, 250, 0, 220)
-MainFrame.Position = UDim2.new(0.05, 0, 0.3, 0)
-MainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
-MainFrame.BorderSizePixel = 0
-MainFrame.Active = true
-MainFrame.Draggable = true
-MainFrame.Parent = ScreenGui
-
-local MainCorner = Instance.new("UICorner", MainFrame)
-MainCorner.CornerRadius = UDim.new(0, 8)
-
-local Stroke = Instance.new("UIStroke", MainFrame)
-Stroke.Color = Color3.fromRGB(255, 75, 75)
-Stroke.Thickness = 2
-
--- Panel Title
-TitleLabel.Size = UDim2.new(1, 0, 0, 40)
-TitleLabel.BackgroundTransparency = 1
-TitleLabel.Text = "Tomik.Win"
-TitleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
-TitleLabel.Font = Enum.Font.SourceSansBold
-TitleLabel.TextSize = 20
-TitleLabel.Parent = MainFrame
-
--- Auto Alignment List Layout
-UIListLayout.Parent = MainFrame
-UIListLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-UIListLayout.SortOrder = Enum.SortOrder.LayoutOrder
-UIListLayout.Padding = UDim.new(0, 10)
-
--- Uniform Element Generator Function
-local function StyleButton(btn, text, order)
-    btn.Size = UDim2.new(0, 220, 0, 40)
-    btn.BackgroundColor3 = Color3.fromRGB(45, 45, 50)
-    btn.Font = Enum.Font.SourceSansSemibold
-    btn.TextSize = 16
-    btn.TextColor3 = Color3.fromRGB(255, 100, 100)
-    btn.Text = text .. " : OFF"
-    btn.LayoutOrder = order
-    btn.BorderSizePixel = 0
-    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
-    btn.Parent = MainFrame
+if not mobileGui.Parent then
+    mobileGui.Parent = game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui")
 end
 
-StyleButton(ToggleCoin, "Coin Farm", 1)
-StyleButton(ToggleReset, "Auto Reset on Full", 2)
-StyleButton(ToggleFling, "Auto Fling Murderer", 3)
+local mobileFrame = Instance.new("Frame")
+mobileFrame.Name = "ButtonContainer"
+mobileFrame.Size = UDim2.new(0, 120, 0, 78)
+mobileFrame.Position = UDim2.new(0, 20, 0.45, 0)
+mobileFrame.BackgroundTransparency = 1
+mobileFrame.Active = true
+mobileFrame.Parent = mobileGui
 
--- Connected Interactive Controls
-ToggleCoin.MouseButton1Click:Connect(function()
-    Config.CoinAutofarm = not Config.CoinAutofarm
-    if Config.CoinAutofarm then
-        ToggleCoin.TextColor3 = Color3.fromRGB(100, 255, 100)
-        ToggleCoin.Text = "Coin Farm : ON"
+local listLayout = Instance.new("UIListLayout")
+listLayout.Padding = UDim.new(0, 8)
+listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+listLayout.Parent = mobileFrame
+
+-- Toggle UI Button
+local toggleBtn = Instance.new("TextButton")
+toggleBtn.Name = "ToggleUI"
+toggleBtn.Size = UDim2.new(1, 0, 0, 35)
+toggleBtn.BackgroundColor3 = Color3.fromRGB(15, 17, 24)
+toggleBtn.BorderSizePixel = 0
+toggleBtn.Font = Enum.Font.Code
+toggleBtn.Text = "Toggle UI"
+toggleBtn.TextColor3 = Color3.fromRGB(245, 245, 245)
+toggleBtn.TextSize = 13
+toggleBtn.LayoutOrder = 1
+toggleBtn.AutoButtonColor = true
+toggleBtn.Parent = mobileFrame
+
+local toggleStroke = Instance.new("UIStroke")
+toggleStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+toggleStroke.Color = Color3.fromRGB(0, 102, 255)
+toggleStroke.Thickness = 1.6
+toggleStroke.Parent = toggleBtn
+
+local toggleCorner = Instance.new("UICorner")
+toggleCorner.CornerRadius = UDim.new(0, 2)
+toggleCorner.Parent = toggleBtn
+
+-- Unlock UI Button
+local unlockBtn = Instance.new("TextButton")
+unlockBtn.Name = "UnlockUI"
+unlockBtn.Size = UDim2.new(1, 0, 0, 35)
+unlockBtn.BackgroundColor3 = Color3.fromRGB(15, 17, 24)
+unlockBtn.BorderSizePixel = 0
+unlockBtn.Font = Enum.Font.Code
+unlockBtn.Text = "Unlock UI"
+unlockBtn.TextColor3 = Color3.fromRGB(245, 245, 245)
+unlockBtn.TextSize = 13
+unlockBtn.LayoutOrder = 2
+unlockBtn.AutoButtonColor = true
+unlockBtn.Parent = mobileFrame
+
+local unlockStroke = Instance.new("UIStroke")
+unlockStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+unlockStroke.Color = Color3.fromRGB(0, 102, 255)
+unlockStroke.Thickness = 1.6
+unlockStroke.Parent = unlockBtn
+
+local unlockCorner = Instance.new("UICorner")
+unlockCorner.CornerRadius = UDim.new(0, 2)
+unlockCorner.Parent = unlockBtn
+
+-- Button interactions
+local dragging = false
+local dragStart, startPos
+local isUnlocked = false
+
+unlockBtn.MouseButton1Click:Connect(function()
+    isUnlocked = not isUnlocked
+    if isUnlocked then
+        unlockBtn.Text = "Lock UI"
+        unlockStroke.Color = Color3.fromRGB(0, 220, 120)
     else
-        ToggleCoin.TextColor3 = Color3.fromRGB(255, 100, 100)
-        ToggleCoin.Text = "Coin Farm : OFF"
+        unlockBtn.Text = "Unlock UI"
+        unlockStroke.Color = Color3.fromRGB(0, 102, 255)
     end
 end)
 
-ToggleReset.MouseButton1Click:Connect(function()
-    Config.AutoReset = not Config.AutoReset
-    ToggleReset.TextColor3 = Config.AutoReset and Color3.fromRGB(100, 255, 100) or Color3.fromRGB(255, 100, 100)
-    ToggleReset.Text = "Auto Reset on Full : " .. (Config.AutoReset and "ON" or "OFF")
+toggleBtn.MouseButton1Click:Connect(function()
+    task.spawn(bc.Toggle)
 end)
 
-ToggleFling.MouseButton1Click:Connect(function()
-    Config.AutoFling = not Config.AutoFling
-    ToggleFling.TextColor3 = Config.AutoFling and Color3.fromRGB(100, 255, 100) or Color3.fromRGB(255, 100, 100)
-    ToggleFling.Text = "Auto Fling Murderer : " .. (Config.AutoFling and "ON" or "OFF")
+local function updateInput(input)
+    local delta = input.Position - dragStart
+    mobileFrame.Position = UDim2.new(
+        startPos.X.Scale,
+        startPos.X.Offset + delta.X,
+        startPos.Y.Scale,
+        startPos.Y.Offset + delta.Y
+    )
+end
+
+mobileFrame.InputBegan:Connect(function(input)
+    if not isUnlocked then return end
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = mobileFrame.Position
+
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+        end)
+    end
 end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if dragging and isUnlocked then
+        if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+            updateInput(input)
+        end
+    end
+end)
+
+-- Mobile buttons visibility toggle in Settings
+bj:AddToggle('ShowMobileButtons', {
+    Text = 'Mobile Buttons',
+    Default = true,
+    Tooltip = 'Shows on-screen Toggle UI and Unlock UI buttons',
+    Callback = function(v)
+        mobileGui.Enabled = v
+    end
+})
+
+--------------------------------------------------------------------------------
+-- SAVE & THEME MANAGER
+--------------------------------------------------------------------------------
+ci:SetLibrary(bc)
+bx:SetLibrary(bc)
+bx:IgnoreThemeSettings()
+bx:SetIgnoreIndexes({})
+ci:SetFolder('logic')
+bx:SetFolder('logic/autofarm')
+bx:BuildConfigSection(ch.Settings)
+ci:ApplyToTab(ch.Settings)
+ci:ApplyTheme('Logic')
+
+--------------------------------------------------------------------------------
+-- UNLOAD & CLEANUP
+--------------------------------------------------------------------------------
+bc:OnUnload(function()
+    pcall(function()
+        if stopFarm then stopFarm() end
+        if setAntiAFK then setAntiAFK(false) end
+        if setAutoReset then setAutoReset(false) end
+        if setAutoShells then setAutoShells(false) end
+        if setPerfMode then setPerfMode(false) end
+        if mobileGui then mobileGui:Destroy() end
+    end)
+end)
+
+-- watermark
+bc.ToggleKeybind = Options.MenuKeybind
+bc.KeybindFrame.Visible = false
+bc:SetWatermarkVisibility(true)
+bc:SetWatermark('creep.cc autofarm')
+bc:OnUnload(function()
+    bc.Unloaded = true
+end)
+
+-- unload
+return function()
+    bc:Unload()
+end
